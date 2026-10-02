@@ -1,0 +1,36 @@
+{
+  "name": "dsh-agent-preset-manager",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Loads agent presets from local directories into DSH 0.2's agent-preset registry, and manages them from a tab inside Settings > Local plugins (enable, add, edit, delete, import, migrate).",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "agent-preset",
+    "preset-manager",
+    "settings",
+    "local-plugins"
+  ],
+  "files": [
+    "src/",
+    "README.md",
+    "ACCEPTANCE.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./client": "./src/client.js",
+    "./host-core": "./src/host-core.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web"
+    }
+  }
+}
