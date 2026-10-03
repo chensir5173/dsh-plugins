@@ -211,9 +211,12 @@ window.__ModuleLoader__.load({
       form: { display: 'flex', flexDirection: 'column', gap: 8, border: '.5px solid var(--dsw-alias-border-l3)', borderRadius: 12, padding: '12px 14px' },
       field: { display: 'flex', flexDirection: 'column', gap: 4 },
       fieldLabel: { fontSize: 12, color: 'var(--dsw-alias-label-tertiary)' },
-      switch: { boxSizing: 'border-box', width: 36, height: 20, borderRadius: 10, padding: 2, background: 'var(--dsw-alias-border-l3)', cursor: 'pointer', border: 'none', flex: 'none', position: 'relative' },
-      switchOn: { background: 'var(--dsw-alias-label-primary)' },
-      knob: { width: 16, height: 16, borderRadius: '50%', background: '#fff', transition: 'transform .12s ease', transform: 'translateX(0)' },
+      // toggle 形态：38×22 轨道 + 18 圆点（位移 38-4-18=16px）。开启态用品牌色，
+      // 与 dsh-plugin-manager 的开关保持一致；圆点用 label-primary-foreground 而不是
+      // #fff，浅色主题下才不会与轨道糊成一片。
+      switch: { boxSizing: 'border-box', width: 38, height: 22, borderRadius: 11, padding: 2, background: 'var(--dsw-alias-border-l3)', cursor: 'pointer', border: 'none', flex: 'none', display: 'inline-flex', alignItems: 'center', transition: 'background .15s ease' },
+      switchOn: { background: 'var(--dsw-alias-brand-primary)' },
+      knob: { boxSizing: 'border-box', display: 'block', width: 18, height: 18, borderRadius: '50%', background: 'var(--dsw-alias-label-primary-foreground, #fff)', boxShadow: '0 1px 2px rgba(0, 0, 0, .35)', transition: 'transform .15s ease', transform: 'translateX(0)' },
       knobOn: { transform: 'translateX(16px)' },
       mono: { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: 12, wordBreak: 'break-all' },
       pre: { margin: 0, padding: 8, background: 'var(--dsw-alias-bg-layer-1)', borderRadius: 8, fontSize: 12, overflowX: 'auto' },
@@ -319,13 +322,15 @@ window.__ModuleLoader__.load({
       return lines
     }
 
-    /** 功能作用：开关滑块。参数：props = { on, disabled, busy, onToggle, title }。返回值：React 元素。 */
+    // 功能作用：开关滑块。参数：props = { on, disabled, busy, onToggle, title }。返回值：React 元素。
+    // 语义用 role="switch" + aria-checked（旧版用的 aria-pressed 是按钮语义，读屏会念成「按下」）。
     function Toggle(props) {
       const disabled = Boolean(props.disabled || props.busy)
       return React.createElement('button', {
         type: 'button',
+        role: 'switch',
+        'aria-checked': props.on ? 'true' : 'false',
         title: props.title || '',
-        'aria-pressed': props.on ? 'true' : 'false',
         disabled: disabled,
         onClick: () => { if (!disabled) props.onToggle() },
         style: merge(S.switch, props.on ? S.switchOn : null, disabled ? S.buttonDisabled : null),

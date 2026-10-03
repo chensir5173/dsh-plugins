@@ -14,6 +14,7 @@
 // Both hold preset.yml (display metadata) + agent.cordis.yml (plugin row list).
 
 import path from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 export const PLUGIN_ID = 'dsh-agent-preset-manager'
 export const API_PREFIX = '/__dsh-agent-presets'
@@ -102,6 +103,11 @@ function isBlockHeader(rest) {
 function parseScalar(s) {
   if (typeof s !== 'string') return s
   if (s.startsWith('!!js')) return { __js: s.slice(4).trim() }
+  if (s.startsWith('[') || s.startsWith('{')) return parseFlow(s)
+  return plainScalar(s)
+}
+
+function plainScalar(s) {
   if (s.startsWith("'") && s.endsWith("'") && s.length >= 2) return s.slice(1, -1).replace(/''/g, "'")
   if (s.startsWith('"') && s.endsWith('"') && s.length >= 2) {
     try { return JSON.parse(s) } catch { return s.slice(1, -1) }
@@ -110,10 +116,108 @@ function parseScalar(s) {
   if (s === 'true') return true
   if (s === 'false') return false
   if (/^-?\d+(\.\d+)?$/.test(s)) return Number(s)
-  if (s.startsWith('&') || s.startsWith('*') || s.startsWith('{') || s.startsWith('[')) {
-    throw new Error('unsupported YAML feature (anchors/aliases/flow collections): ' + s.slice(0, 40))
+  if (s.startsWith('&') || s.startsWith('*')) {
+    throw new Error('unsupported YAML feature (anchors/aliases): ' + s.slice(0, 40))
   }
   return s
+}
+
+/**
+ * Flow collections that fit on one line: `[bash]`, `[user, goal]`, `{a: b}`, and
+ * anything nested inside them.
+ *
+ * They are not a nicety: the real `liangshen` composition writes
+ * `shellTools: [bash]`, and rejecting it made a perfectly good preset show up
+ * as「组合有问题」with「第 1 行：unsupported YAML feature …」. Only the one-line
+ * form is accepted here — a collection that spills across lines reports that
+ * instead of silently swallowing the rest of the file.
+ */
+function parseFlow(src) {
+  const cursor = { at: 0 }
+  const value = flowValue(src, cursor)
+  flowSpace(src, cursor)
+  if (cursor.at < src.length) throw new Error('流式集合必须写在一行内：' + src.slice(0, 40))
+  return value
+}
+
+function flowSpace(src, cursor) {
+  while (cursor.at < src.length && (src[cursor.at] === ' ' || src[cursor.at] === '\t')) cursor.at++
+}
+
+function flowValue(src, cursor) {
+  flowSpace(src, cursor)
+  const head = src[cursor.at]
+  if (head === '[') {
+    cursor.at++
+    const out = []
+    flowSpace(src, cursor)
+    if (src[cursor.at] === ']') { cursor.at++; return out }
+    for (;;) {
+      out.push(flowValue(src, cursor))
+      flowSpace(src, cursor)
+      const seen = src[cursor.at]
+      if (seen === ',') { cursor.at++; continue }
+      if (seen === ']') { cursor.at++; return out }
+      throw new Error('流式数组写法有问题：' + src.slice(0, 40))
+    }
+  }
+  if (head === '{') {
+    cursor.at++
+    const out = {}
+    flowSpace(src, cursor)
+    if (src[cursor.at] === '}') { cursor.at++; return out }
+    for (;;) {
+      flowSpace(src, cursor)
+      const key = flowKey(src, cursor)
+      flowSpace(src, cursor)
+      if (src[cursor.at] !== ':') throw new Error('流式映射缺少冒号：' + src.slice(0, 40))
+      cursor.at++
+      out[key] = flowValue(src, cursor)
+      flowSpace(src, cursor)
+      const seen = src[cursor.at]
+      if (seen === ',') { cursor.at++; continue }
+      if (seen === '}') { cursor.at++; return out }
+      throw new Error('流式映射写法有问题：' + src.slice(0, 40))
+    }
+  }
+  if (head === '&' || head === '*') {
+    throw new Error('unsupported YAML feature (anchors/aliases): ' + src.slice(0, 40))
+  }
+  if (head === '"' || head === "'") return flowQuoted(src, cursor)
+  const from = cursor.at
+  while (cursor.at < src.length && ',]}'.indexOf(src[cursor.at]) < 0) {
+    if (src[cursor.at] === ':' && (cursor.at + 1 >= src.length || src[cursor.at + 1] === ' ')) break
+    cursor.at++
+  }
+  return plainScalar(src.slice(from, cursor.at).trim())
+}
+
+function flowKey(src, cursor) {
+  if (src[cursor.at] === '"' || src[cursor.at] === "'") return String(flowQuoted(src, cursor))
+  const from = cursor.at
+  while (cursor.at < src.length && src[cursor.at] !== ':' && ',]}'.indexOf(src[cursor.at]) < 0) cursor.at++
+  return src.slice(from, cursor.at).trim()
+}
+
+function flowQuoted(src, cursor) {
+  const quote = src[cursor.at]
+  const escapes = { n: '\n', t: '\t', r: '\r', b: '\b', f: '\f', '"': '"', '\\': '\\', '/': '/' }
+  let out = ''
+  cursor.at++
+  while (cursor.at < src.length) {
+    const ch = src[cursor.at]
+    if (quote === "'" && ch === "'" && src[cursor.at + 1] === "'") { out += "'"; cursor.at += 2; continue }
+    if (ch === quote) { cursor.at++; return out }
+    if (quote === '"' && ch === '\\' && cursor.at + 1 < src.length) {
+      const next = src[cursor.at + 1]
+      out += escapes[next] !== undefined ? escapes[next] : next
+      cursor.at += 2
+      continue
+    }
+    out += ch
+    cursor.at++
+  }
+  throw new Error('流式标量的引号没有闭合：' + src.slice(0, 40))
 }
 
 function blockScalar(toks, j, indent, header) {
@@ -305,18 +409,31 @@ export function createRuntimeProbe(ctx, versions) {
     getHandles() {
       return probe.handles
     },
-    enable(definition) {
+    async enable(definition) {
       const registry = probe.service
       if (!registry) return { ok: false, error: MSG.serviceUnavailable }
-      let dispose = null
+      let returned = null
       try {
-        dispose = registry.register({
+        returned = registry.register({
           id: definition.id,
           name: definition.name,
           ...(definition.description ? { description: definition.description } : {}),
           ...(typeof definition.order === 'number' ? { order: definition.order } : {}),
           plugins: definition.plugins,
         })
+      } catch (error) {
+        return { ok: false, error: String((error && error.message) || error) }
+      }
+      // 0.2.x declares register() as `async`, and it resolves with the disposer
+      // only once the preset tree has mounted. Two failures follow from reading
+      // that promise as a function: every enable is refused as "no disposer",
+      // and a genuine refusal (Duplicate agent preset, empty row list) is
+      // delivered to a promise nobody handles — an unhandled rejection, which
+      // the dsh launcher reports as a fatal load failure. Await it, and turn a
+      // rejection into the ordinary failure the panel already renders.
+      let dispose = null
+      try {
+        dispose = await returned
       } catch (error) {
         return { ok: false, error: String((error && error.message) || error) }
       }
@@ -334,11 +451,13 @@ export function createRuntimeProbe(ctx, versions) {
       probe.handles.set(definition.id, { dispose: undo, error: null, baseUrl: definition.dir || null })
       return { ok: true, id: definition.id, dispose: undo }
     },
-    disable(id) {
+    async disable(id) {
       const handle = probe.handles.get(id)
       if (!handle) return { ok: true, noop: true }
       try {
-        handle.dispose()
+        // The host disposer is async as well: awaiting it is what stops a failed
+        // unregister from escaping as an unhandled rejection.
+        await handle.dispose()
         probe.handles.delete(id)
         return { ok: true }
       } catch (error) {
@@ -497,6 +616,54 @@ export function flattenRows(rows) {
   return out
 }
 
+/**
+ * Turn a preset's parsed rows into exactly what the host registry must receive.
+ *
+ * Two translations happen here. Both are invisible on disk: the panel keeps
+ * showing the file the user actually wrote.
+ *
+ *   1. A relative row name (`./tool-bootstrap.mjs`) means "next to preset.yml" —
+ *      the pre-0.2.0 contract, and what the file says. The 0.2 registry mounts
+ *      the declaration under the HOST's base URL instead, so the row has to
+ *      travel as an absolute file URL or every preset carrying a local plugin
+ *      fails to mount.
+ *   2. A computed value (`disabled: !!js process.platform === 'win32'`) is kept
+ *      as `{__js: …}` by our parser so the file round-trips byte-for-byte. The
+ *      official route into the registry is YAML text, which the host evaluates
+ *      itself — an already-parsed array has nothing left to evaluate it, so the
+ *      row would otherwise mount as if the tag were absent.
+ *
+ * A group's children live in its `config` array, so the walk covers that too.
+ */
+export function prepareRows(rows, baseDir) {
+  const base = typeof baseDir === 'string' && baseDir !== '' ? baseDir : null
+  const list = Array.isArray(rows) ? rows : []
+  return list.map((row) => prepareRow(row, base))
+}
+
+function prepareRow(row, base) {
+  if (Array.isArray(row)) return row.map((child) => prepareRow(child, base))
+  if (!row || typeof row !== 'object') return row
+  const keys = Object.keys(row)
+  if (keys.length === 1 && keys[0] === '__js') return evaluateJs(row.__js)
+  const next = {}
+  for (const key of keys) next[key] = prepareRow(row[key], base)
+  const name = next.name
+  if (base && typeof name === 'string' && (name.startsWith('./') || name.startsWith('../'))) {
+    next.name = pathToFileURL(path.resolve(base, name)).href
+  }
+  return next
+}
+
+/** Evaluate one `!!js` expression taken from a user-owned preset file. */
+function evaluateJs(expression) {
+  try {
+    return new Function('return (' + String(expression) + ')')()
+  } catch (caught) {
+    throw new Error('!!js 表达式无法求值：' + String(expression) + '（' + String((caught && caught.message) || caught) + '）')
+  }
+}
+
 const CORDIS_BUILTINS = new Set(['cordis:group'])
 
 function resolveLocalName(name, baseDir) {
@@ -513,13 +680,23 @@ function resolveLocalName(name, baseDir) {
 /**
  * Judge whether one row's `name` will resolve when the host activates the preset.
  *
- * The base URL in play is the preset's OWN directory — that is what the registry
- * mounts a declaration under — so `./custom-bash.mjs` means "next to preset.yml".
+ * A relative row is judged against the preset's OWN directory, because that is
+ * what `./custom-bash.mjs` means in a hand-written preset ("next to preset.yml").
+ * That is NOT what a 0.2 registry resolves — it mounts the declaration under the
+ * HOST base URL — which is exactly why `absolutizeRows` rewrites such a row to a
+ * file URL before the declaration is handed over.
+ *
+ * The package probe is RESOLUTION ONLY and strictly synchronous: `resolve(name)`
+ * returns the resolved directory or null. It must never degrade into a dynamic
+ * `import()` — importing a row would execute a plugin the user has not enabled,
+ * and a rejected import whose promise nobody awaits escapes as an unhandled
+ * rejection, which the dsh launcher reports as a fatal load failure
+ * (`ERR_MODULE_NOT_FOUND … imported from …/src/index.js`).
  */
 export function checkRowNames(rows, options) {
   const opts = options || {}
   const baseDir = opts.baseDir || null
-  const load = typeof opts.load === 'function' ? opts.load : null
+  const resolve = typeof opts.resolve === 'function' ? opts.resolve : null
   const exists = typeof opts.exists === 'function' ? opts.exists : null
   const results = []
 
@@ -560,9 +737,11 @@ export function checkRowNames(rows, options) {
     }
     let resolved = null
     let error = null
-    if (typeof load === 'function') {
+    if (typeof resolve === 'function') {
       try {
-        resolved = load(name)
+        const found = resolve(name)
+        if (typeof found === 'string' && found !== '') resolved = found
+        else error = '解析器没有找到该包'
       } catch (caught) {
         error = String((caught && caught.message) || caught)
       }
@@ -757,7 +936,7 @@ export function collectState(core) {
   for (const item of scanned.items) {
     const meta = readMetadata(deps, item.dir)
     const composition = readComposition(deps, item.dir)
-    const checks = composition.rows.length ? checkRowNames(composition.rows, { baseDir: item.dir, load: deps.load, exists: deps.exists }) : []
+    const checks = composition.rows.length ? checkRowNames(composition.rows, { baseDir: item.dir, resolve: deps.resolveSpec, exists: deps.exists }) : []
     const verdict = rowVerdict(checks)
     const runtimeInfo = conflictStatus(scanned, runtime, state, item.id)
     const status = composition.error && runtimeInfo.status === 'disabled' ? 'invalid' : runtimeInfo.status
@@ -886,7 +1065,7 @@ export function readStandardSkeleton(deps, candidates) {
 
 // --- operations -------------------------------------------------------------
 
-function applyEnabled(core, id, enabled) {
+async function applyEnabled(core, id, enabled) {
   const { deps, runtime } = core
   const home = core.home()
   const scanned = scanLibraries(deps, home)
@@ -904,10 +1083,17 @@ function applyEnabled(core, id, enabled) {
     const composition = readComposition(deps, item.dir)
     if (composition.error) return failure(composition.error)
     if (composition.rows.length === 0) return failure('组成是空的，没有可以声明的插件行。')
-    let definitionRows = composition.rows
-    const needName = !meta.name
-    if (needName) definitionRows = definitionRows.map((row) => row)
-    const result = runtime.enable({
+    // See prepareRows: relative row names travel as absolute file URLs and
+    // `!!js` values are evaluated before the host ever sees them. A preset whose
+    // expression cannot be evaluated is refused here, with the expression named,
+    // rather than mounted with a row the user did not ask for.
+    let definitionRows = null
+    try {
+      definitionRows = prepareRows(composition.rows, item.dir)
+    } catch (error) {
+      return failure(String((error && error.message) || error))
+    }
+    const result = await runtime.enable({
       id,
       name: meta.name || id,
       description: meta.description || undefined,
@@ -923,7 +1109,7 @@ function applyEnabled(core, id, enabled) {
     declaration = result
     restore = result.dispose
   } else {
-    const result = runtime.disable(id)
+    const result = await runtime.disable(id)
     if (result && result.ok === false) return failure(String(result.error || '撤除声明失败'))
   }
 
@@ -933,7 +1119,7 @@ function applyEnabled(core, id, enabled) {
     saveState(deps, home, next)
   } catch (error) {
     if (enabled && typeof restore === 'function') {
-      try { restore() } catch { /* the state write already failed; nothing else to do */ }
+      try { await restore() } catch { /* the state write already failed; nothing else to do */ }
     }
     return failure('保存启用状态失败：' + String((error && error.message) || error))
   }
@@ -1080,8 +1266,8 @@ export function createOperations(deps) {
   const home = deps.home
   const homeLabel = legacy => (legacy ? LEGACY_LIBRARY_DIR : LIBRARY_DIR)
 
-  function applyEnabledCmd(id, enabled) {
-    const result = applyEnabled(core, id, enabled)
+  async function applyEnabledCmd(id, enabled) {
+    const result = await applyEnabled(core, id, enabled)
     if (!result.ok) return { ok: false, error: result.error, state: collectState(core) }
     return { ok: true, id, enabled: Boolean(enabled), declaration: result.declaration, state: result.state }
   }
@@ -1146,7 +1332,7 @@ export function createOperations(deps) {
     }
     let undeclared = false
     if (core.runtime && core.runtime.supported && core.runtime.getHandles().has(body.id)) {
-      const off = core.runtime.disable(body.id)
+      const off = await core.runtime.disable(body.id)
       if (off && off.ok === false) return { ok: false, error: '撤除声明失败：' + String(off.error || ''), state: collectState(core) }
       undeclared = true
     }
@@ -1203,7 +1389,7 @@ export function createOperations(deps) {
       // has the same id is flagged so the panel can say so before anything runs.
       const conflict = currentIds.has(item.id)
       const composition = readComposition(deps, item.dir)
-      const checks = composition.rows.length ? checkRowNames(composition.rows, { baseDir: item.dir, load: deps.load, exists: deps.exists }) : []
+      const checks = composition.rows.length ? checkRowNames(composition.rows, { baseDir: item.dir, resolve: deps.resolveSpec, exists: deps.exists }) : []
       const verdict = rowVerdict(checks)
       plans.push({
         id: item.id,

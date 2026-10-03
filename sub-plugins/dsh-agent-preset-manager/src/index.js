@@ -21,6 +21,10 @@
 // Conventions inherited from the sibling plugins in this repository:
 //   - no @deepseek-ai/* import (a link:-installed host half cannot resolve
 //     them): every host service is reached through ctx.get / ctx.inject;
+//   - NO dynamic import() of a preset row anywhere in this plugin: probing a
+//     row by importing it would execute a plugin the user has not enabled, and
+//     a rejected import with no handler makes the launcher abort with a fatal
+//     load failure. Probes resolve a name, they never load a module;
 //   - all non-trivial logic lives in host-core.js behind injected deps, so the
 //     whole feature is testable with a fake filesystem;
 //   - ESM named exports: apply / inject / name.
@@ -31,7 +35,7 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createRequire } from 'node:module'
 
 import {
@@ -116,9 +120,55 @@ function makeDeps(ctx) {
     try { hostRequire = createRequire(baseUrl) } catch { /* keep our own */ }
   }
   const profileDir = baseUrl ? path.dirname(fileURLToPath(baseUrl)) : sourceDir
+  const home = dshHome()
+
+  /**
+   * Base URLs the host's own resolver may route through, most authoritative
+   * first. `parentURL` decides WHICH routing layer answers: a parent inside the
+   * profiles tree is answered from the profile layer (where the official
+   * @deepseek-ai/* packages live), a linked-repo parent is not. Asking with
+   * several bases is how a static probe agrees with the registry.
+   */
+  let parentCache = null
+  const resolutionParents = () => {
+    if (parentCache) return parentCache
+    const parents = []
+    const push = (value) => {
+      if (typeof value !== 'string' || value === '') return
+      if (parents.indexOf(value) < 0) parents.push(value)
+    }
+    const service = (key) => {
+      try { return ctx.get(key) } catch { return undefined }
+    }
+    // 1. The preset registry's own ctx: mount.ts hands exactly this baseUrl to
+    //    prepareProfileEntries, so its answer IS the host's answer.
+    const registry = service('agentPresets')
+    for (const holder of [registry, registry && registry.ctx, registry && registry.owner]) {
+      if (holder) push(holder.baseUrl)
+    }
+    // 2. The active profile, when the host exposes it as a service.
+    const profileContext = service('profileContext')
+    for (const key of ['dir', 'root', 'path']) {
+      const dir = profileContext && profileContext[key]
+      if (typeof dir === 'string' && dir !== '') push(pathToFileURL(path.join(dir, 'package.json')).href)
+    }
+    // 3. Every profile under $DSH_HOME/profiles — a parent inside the profiles
+    //    tree is what the router needs to answer from the profile layer.
+    try {
+      const profilesDir = path.join(home, 'profiles')
+      for (const entry of fs.readdirSync(profilesDir, { withFileTypes: true })) {
+        if (!entry.isDirectory()) continue
+        push(pathToFileURL(path.join(profilesDir, entry.name, 'package.json')).href)
+      }
+    } catch { /* no profiles directory yet */ }
+    // 4. Our own declaration point, then this module.
+    push(baseUrl)
+    parentCache = parents
+    return parents
+  }
 
   return {
-    home: dshHome(),
+    home,
     profileDir,
     baseUrl,
 
@@ -184,8 +234,32 @@ function makeDeps(ctx) {
       return target
     },
 
-    load(spec) {
-      return import(spec)
+    /**
+     * Resolve one preset row's package name to a directory, WITHOUT executing
+     * anything. The host's `pluginPackages` service is asked first: it is the
+     * same resolver the registry uses to mount a preset, so a row that answers
+     * here answers there. Native CJS resolution is only a fallback. Never turn
+     * this into a dynamic import() — see the checkRowNames contract in
+     * host-core.js.
+     */
+    resolveSpec(spec) {
+      const packages = (() => {
+        try { return ctx.get('pluginPackages') } catch { return undefined }
+      })()
+      if (packages && typeof packages.packageOf === 'function') {
+        for (const parentURL of resolutionParents()) {
+          try {
+            const found = packages.packageOf(spec, parentURL)
+            if (found && typeof found.dir === 'string' && found.dir !== '') return found.dir
+          } catch { /* this base is not routable: try the next one */ }
+        }
+      }
+      for (const req of [hostRequire, sourceRequire]) {
+        try {
+          return req.resolve(spec)
+        } catch { /* keep probing */ }
+      }
+      return null
     },
     resolvePackageDir(spec) {
       try {
@@ -327,16 +401,19 @@ function adoptRegistry(ctx, runtime) {
 }
 
 /** Re-declare everything state.json remembers (nothing is enabled on first run). */
-function restoreEnabled(core) {
+async function restoreEnabled(core) {
   const { deps, runtime } = core
   const report = { attempted: 0, restored: [], failed: [] }
   const ids = core.loadState().state.enabled.slice()
   const opsApi = createOperations(deps)
   for (const id of ids) {
     report.attempted += 1
-    const result = opsApi.applyEnabled(id, true)
-    if (result.ok && result.declaration && result.declaration.ok) report.restored.push(id)
-    else report.failed.push({ id, error: result.error || (result.declaration && result.declaration.error) || '未知错误' })
+    // Declaration is async in 0.2.x (it settles after the preset tree mounted),
+    // so each entry is awaited before the next one is declared.
+    const result = await opsApi.applyEnabled(id, true)
+    const broken = result.declaration ? result.declaration.broken : null
+    if (result.ok && !broken) report.restored.push(id)
+    else report.failed.push({ id, error: result.error || broken || '未知错误' })
   }
   return report
 }
@@ -348,6 +425,7 @@ export function apply(ctx) {
 
   const boot = { errors: [] }
   let restoreReport = null
+  let restoreSettled = false
   /** The exact core shape host-core expects (home is a getter, not a value). */
   const core = {
     deps,
@@ -361,15 +439,22 @@ export function apply(ctx) {
       }
     },
   }
-  const migrateRef = () => ({ ok: true, restored: restoreReport, state: collectState(core) })
+  const migrateRef = () => ({ ok: true, restored: restoreReport, restoredPending: !restoreSettled, state: collectState(core) })
 
   const mounted = () => {
     adoptRegistry(ctx, runtime)
-    try {
-      restoreReport = restoreEnabled(core)
-    } catch (error) {
-      boot.errors.push(String((error && error.message) || error))
-    }
+    // Boot must not block on the host: declaring a preset is asynchronous in
+    // 0.2.x, so the report lands a moment later and every reader (/state, the
+    // migrate reply, describe()) picks it up from restoreReport once it is there.
+    void (async () => {
+      try {
+        restoreReport = await restoreEnabled(core)
+      } catch (error) {
+        boot.errors.push(String((error && error.message) || error))
+      } finally {
+        restoreSettled = true
+      }
+    })()
     const handlers = createHandlers(core, migrateRef)
     const mount = (host) => {
       if (!host || typeof host.register !== 'function') return
@@ -405,6 +490,7 @@ export function apply(ctx) {
         runtimeError: runtime.error,
         handles: [...runtime.handles.keys()],
         restore: restoreReport,
+        restorePending: !restoreSettled,
         errors: boot.errors.slice(),
       }
     },

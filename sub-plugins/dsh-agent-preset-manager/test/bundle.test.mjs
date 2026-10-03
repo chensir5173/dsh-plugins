@@ -14,12 +14,15 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { EventEmitter } from 'node:events'
+import { pathToFileURL } from 'node:url'
 
 import {
   API_PREFIX,
   COMPOSITION_FILE,
   METADATA_FILE,
   ROUTE_TABLE,
+  prepareRows,
+  checkRowNames,
   collectState,
   compositionText,
   createOperations,
@@ -87,10 +90,9 @@ function makeWorld(t) {
       for (let i = 0; i < old.length - Math.max(1, keep); i += 1) fs.rmSync(path.join(dir, old[i]))
       return target
     },
-    load: (spec) => {
-      if (spec.startsWith('missing-')) throw new Error("Cannot find module '" + spec + "'")
-      return spec
-    },
+    // Resolution only — this is the contract the row health check relies on.
+    // A fake that imported modules would hide the bug that killed the launcher.
+    resolveSpec: (spec) => (spec.startsWith('missing-') ? null : '/fake/node_modules/' + spec),
     resolvePackageDir: () => null,
     standardSkeletonCandidates: () => [],
   }
@@ -197,11 +199,15 @@ test('yaml subset: parses the built-in standard preset shape', () => {
 })
 
 test('yaml subset: refuses what it cannot represent instead of guessing', () => {
-  for (const bad of ['- id: a\n  name: *anchor\n', '- id: a\n  name: &x b\n', '- id: a\n  name: {a: b}\n', '- id: a\n  name: [1, 2]\n']) {
+  // Anchors/aliases are still refused, and so is a flow collection that spills
+  // across lines — guessing at either would mount a preset the user did not write.
+  for (const bad of ['- id: a\n  name: *anchor\n', '- id: a\n  name: &x b\n', '- id: a\n  name: [\n    bash,\n  ]\n', '- id: a\n  name: {a: 1\n']) {
     const parsed = parseYaml(bad)
     assert.equal(parsed.ok, false, 'expected a refusal for: ' + JSON.stringify(bad))
-    assert.match(parsed.errors[0].message, /unsupported YAML feature/)
+    assert.match(parsed.errors[0].message, /unsupported YAML feature|流式/)
   }
+  // One-line flow collections, by contrast, are part of the accepted subset.
+  assert.equal(parseYaml('- id: a\n  name: [1, 2]\n').ok, true)
 })
 
 test('yaml subset: round-trips rows including !!js, blocks and groups', () => {
@@ -280,7 +286,7 @@ test('scan: metadata is optional, a missing composition is reported not fatal', 
 
   // Broken metadata is reported and does NOT make the preset invalid: only a broken
   // composition does. The user can still open and fix the file from the panel.
-  assert.match(byId.gamma.metadataError, /unsupported YAML feature/)
+  assert.match(byId.gamma.metadataError, /流式|unsupported YAML feature/)
   assert.equal(byId.gamma.status, 'disabled')
   assert.equal(byId.gamma.name, 'gamma')
 
@@ -340,14 +346,20 @@ test('row health: three colours, group rows recursed, disabled rows still judged
 
 const SAMPLE_METADATA = 'name: 示例预设\ndescription: 测试用\norder: 30\n'
 
-/** The host's real contract: register() returns the function that undeclares. */
+/**
+ * The host's real contract: register() is ASYNC and resolves with the function
+ * that undeclares, only after the preset tree has mounted (see
+ * agent-preset-registry/src/index.ts:80-100). Modelling it synchronously would
+ * hide the very bug this file has to keep out: a promise nobody awaits.
+ */
 function adoptRegistry(world, spy = null) {
   const registry = {
     declared: [],
-    register(definition) {
+    async register(definition) {
       if (spy) spy(definition)
       registry.declared.push(definition)
-      return () => {
+      await Promise.resolve()
+      return async () => {
         const index = registry.declared.findIndex((row) => row.id === definition.id)
         if (index >= 0) registry.declared.splice(index, 1)
       }
@@ -361,12 +373,12 @@ function stateFileOf(world) {
   return path.join(world.home, 'agent-preset-manager', 'state.json')
 }
 
-test('enable: declares on the registry and remembers the id in state.json', (t) => {
+test('enable: declares on the registry and remembers the id in state.json', async (t) => {
   const world = makeWorld(t)
   const registry = adoptRegistry(world)
   writePreset(world, 'mine', { metadata: SAMPLE_METADATA, composition: compositionText(SAMPLE_ROWS) })
 
-  const result = world.ops.applyEnabled('mine', true)
+  const result = await world.ops.applyEnabled('mine', true)
   assert.equal(result.ok, true)
   assert.equal(registry.declared.length, 1)
   assert.equal(registry.declared[0].id, 'mine')
@@ -384,44 +396,44 @@ test('enable: declares on the registry and remembers the id in state.json', (t) 
   assert.equal(row.status, 'enabled')
 })
 
-test('disable: undeclares and drops every trace of the id', (t) => {
+test('disable: undeclares and drops every trace of the id', async (t) => {
   const world = makeWorld(t)
   const registry = adoptRegistry(world)
   writePreset(world, 'mine', { metadata: SAMPLE_METADATA, composition: compositionText(SAMPLE_ROWS) })
-  world.ops.applyEnabled('mine', true)
+  await world.ops.applyEnabled('mine', true)
 
-  const off = world.ops.applyEnabled('mine', false)
+  const off = await world.ops.applyEnabled('mine', false)
   assert.equal(off.ok, true)
   assert.equal(registry.declared.length, 0)
   assert.deepEqual(loadState(world.deps, world.home).state.enabled, [])
   assert.equal(collectState(world.core).presets[0].status, 'disabled')
 })
 
-test('enable refuses without a registry, without a directory and without rows', (t) => {
+test('enable refuses without a registry, without a directory and without rows', async (t) => {
   const world = makeWorld(t)
   writePreset(world, 'mine', { metadata: SAMPLE_METADATA, composition: compositionText(SAMPLE_ROWS) })
 
   // No registry adopted yet: 0.2.0-rc2 may not expose one at all.
-  const noService = world.ops.applyEnabled('mine', true)
+  const noService = await world.ops.applyEnabled('mine', true)
   assert.equal(noService.ok, false)
   assert.match(noService.error, /没有 agent preset 注册表服务/)
   assert.equal(fs.existsSync(stateFileOf(world)), false, 'a refusal writes no state file')
 
   const registry = adoptRegistry(world)
-  const noDir = world.ops.applyEnabled('ghost', true)
+  const noDir = await world.ops.applyEnabled('ghost', true)
   assert.equal(noDir.ok, false)
   assert.equal(noDir.error, '找不到这个预设的目录，无法启用：ghost')
 
   // An empty composition has nothing to declare.
   writePreset(world, 'empty', { metadata: SAMPLE_METADATA, composition: '# 只有注释\n' })
-  const noRows = world.ops.applyEnabled('empty', true)
+  const noRows = await world.ops.applyEnabled('empty', true)
   assert.equal(noRows.ok, false)
   assert.match(noRows.error, /组成是空的/)
   assert.equal(registry.declared.length, 0)
   assert.deepEqual(loadState(world.deps, world.home).state.enabled, [])
 })
 
-test('enable keeps the disk clean when the registry refuses the declaration', (t) => {
+test('enable keeps the disk clean when the registry refuses the declaration', async (t) => {
   const world = makeWorld(t)
   const throwing = {
     register() { throw new Error('Duplicate preset id: mine') },
@@ -429,7 +441,7 @@ test('enable keeps the disk clean when the registry refuses the declaration', (t
   world.runtime.adopt(throwing)
   writePreset(world, 'mine', { metadata: SAMPLE_METADATA, composition: compositionText(SAMPLE_ROWS) })
 
-  const result = world.ops.applyEnabled('mine', true)
+  const result = await world.ops.applyEnabled('mine', true)
   assert.equal(result.ok, false)
   assert.match(result.error, /宿主注册预设失败：Duplicate preset id: mine/)
   assert.match(result.error, /已经有一个同名声明/)
@@ -439,7 +451,7 @@ test('enable keeps the disk clean when the registry refuses the declaration', (t
   const forgetful = makeWorld(t)
   writePreset(forgetful, 'mine', { metadata: SAMPLE_METADATA, composition: compositionText(SAMPLE_ROWS) })
   forgetful.runtime.adopt({ register: () => undefined })
-  const noDispose = forgetful.ops.applyEnabled('mine', true)
+  const noDispose = await forgetful.ops.applyEnabled('mine', true)
   assert.equal(noDispose.ok, false)
   assert.match(noDispose.error, /没有返回撤销函数/)
   assert.equal(forgetful.runtime.getHandles().size, 0)
@@ -457,6 +469,158 @@ test('enable rolls the declaration back when the state file cannot be written', 
   assert.match(result.error, /保存启用状态失败：EACCES/)
   assert.equal(registry.declared.length, 0, 'the declaration was undone, so a retry can succeed')
   assert.equal(world.runtime.getHandles().size, 0)
+})
+
+// Regression: the host declares register() as async, so the disposer arrives in a
+// promise. Reading that promise as a function used to refuse every enable AND to
+// leave a rejection unhandled -- which the dsh launcher reports as
+// `fatal load failure`. These four tests pin the whole contract down.
+
+test('enable awaits an async registry and keeps its late disposer', async (t) => {
+  const world = makeWorld(t)
+  const declared = []
+  world.runtime.adopt({
+    async register(definition) {
+      await Promise.resolve()
+      declared.push(definition)
+      return async () => {
+        const index = declared.findIndex((row) => row.id === definition.id)
+        if (index >= 0) declared.splice(index, 1)
+      }
+    },
+  })
+  writePreset(world, 'mine', { metadata: SAMPLE_METADATA, composition: compositionText(SAMPLE_ROWS) })
+
+  const on = await world.ops.applyEnabled('mine', true)
+  assert.equal(on.ok, true)
+  assert.equal(declared.length, 1)
+  assert.equal(world.runtime.getHandles().size, 1)
+
+  // The disposer the host resolved with is the one 「停用」 must reach.
+  const off = await world.ops.applyEnabled('mine', false)
+  assert.equal(off.ok, true)
+  assert.equal(declared.length, 0)
+  assert.equal(world.runtime.getHandles().size, 0)
+  assert.deepEqual(loadState(world.deps, world.home).state.enabled, [])
+})
+
+test('a refused declaration is a failure, never an unhandled rejection', async (t) => {
+  const world = makeWorld(t)
+  const seen = []
+  const onUnhandled = (reason) => seen.push(String((reason && reason.message) || reason))
+  process.on('unhandledRejection', onUnhandled)
+  try {
+    world.runtime.adopt({
+      async register() { throw new Error('Duplicate agent preset: mine') },
+    })
+    writePreset(world, 'mine', { metadata: SAMPLE_METADATA, composition: compositionText(SAMPLE_ROWS) })
+
+    const result = await world.ops.applyEnabled('mine', true)
+    assert.equal(result.ok, false)
+    assert.match(result.error, /宿主注册预设失败：Duplicate agent preset: mine/)
+    assert.match(result.error, /已经有一个同名声明/)
+    assert.equal(fs.existsSync(stateFileOf(world)), false, 'a refusal never reaches state.json')
+
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.deepEqual(seen, [])
+  } finally {
+    process.off('unhandledRejection', onUnhandled)
+  }
+})
+
+test('enable hands the host absolute file URLs for rows written relative', async (t) => {
+  const world = makeWorld(t)
+  const seen = []
+  adoptRegistry(world, (definition) => seen.push(definition))
+  writePreset(world, 'local', {
+    metadata: 'name: local\n',
+    composition: compositionText([
+      { id: 'persona', name: '@deepseek-ai/dsh-persona' },
+      { id: 'helper', name: './helper.mjs' },
+      { id: 'up', name: '../shared.mjs' },
+      { id: 'group', name: 'cordis:group', group: true, config: [{ id: 'inner', name: './inner.mjs' }] },
+      // Written as `disabled: !!js …`, read back as a wrapper, handed over as a boolean.
+      { id: 'win-only', name: '@deepseek-ai/dsh-persona', disabled: { __js: "process.platform === 'win32'" } },
+    ]),
+    extraFiles: { 'helper.mjs': 'export const x = 1\n' },
+  })
+
+  const result = await world.ops.applyEnabled('local', true)
+  assert.equal(result.ok, true)
+  const presetDir = path.join(world.home, 'agent-presets', 'local')
+  const byId = Object.fromEntries(seen[0].plugins.map((row) => [row.id, row]))
+  assert.equal(byId.persona.name, '@deepseek-ai/dsh-persona', 'a package name is left alone')
+  assert.equal(byId.helper.name, pathToFileURL(path.join(presetDir, 'helper.mjs')).href)
+  assert.equal(byId.up.name, pathToFileURL(path.join(presetDir, '..', 'shared.mjs')).href)
+  assert.equal(byId.group.config[0].name, pathToFileURL(path.join(presetDir, 'inner.mjs')).href)
+  assert.equal(byId['win-only'].disabled, process.platform === 'win32', 'the host gets a boolean, not {__js}')
+  // The rewrite is for the host only: the file on disk still reads as written.
+  assert.match(fs.readFileSync(path.join(presetDir, 'agent.cordis.yml'), 'utf8'), /name: \.\/helper\.mjs/)
+})
+
+test('prepareRows rewrites only relative row names', (t) => {
+  const base = path.resolve(os.tmpdir(), 'preset')
+  const rows = prepareRows([
+    { id: 'a', name: '@deepseek-ai/dsh-persona' },
+    { id: 'b', name: 'cordis:group' },
+    { id: 'c', name: 'file:///tmp/x.mjs' },
+    { id: 'd', name: 'C:\\tmp\\x.mjs' },
+    { id: 'e', name: './x.mjs' },
+  ], base)
+  assert.deepEqual(rows.map((row) => row.name), [
+    '@deepseek-ai/dsh-persona',
+    'cordis:group',
+    'file:///tmp/x.mjs',
+    'C:\\tmp\\x.mjs',
+    pathToFileURL(path.join(base, 'x.mjs')).href,
+  ])
+  // No base directory: the row keeps its legacy spelling instead of guessing.
+  assert.equal(prepareRows([{ id: 'e', name: './x.mjs' }], null)[0].name, './x.mjs', 'no base directory: the legacy spelling is kept')
+})
+
+test('prepareRows evaluates !!js values instead of handing the wrapper to the host', (t) => {
+  const rows = prepareRows([
+    { id: 'win', name: 'pkg', disabled: { __js: "process.platform === 'win32'" } },
+    { id: 'group', name: 'cordis:group', group: true, config: [{ id: 'inner', name: 'pkg', disabled: { __js: '1 === 1' } }] },
+  ], null)
+  assert.equal(rows[0].disabled, process.platform === 'win32')
+  assert.equal(typeof rows[0].disabled, 'boolean')
+  assert.equal(rows[1].config[0].disabled, true)
+  // An expression that cannot run is refused by name, never silently ignored.
+  let caught = null
+  try {
+    prepareRows([{ id: 'bad', name: 'pkg', disabled: { __js: '(((' } }], null)
+  } catch (error) {
+    caught = error
+  }
+  assert.match(String(caught && caught.message), /!!js 表达式无法求值/)
+  assert.match(String(caught && caught.message), /\(\(\(/)
+})
+
+test('parseYaml reads the one-line flow collections real compositions use', (t) => {
+  const text = [
+    '- id: a',
+    '  name: pkg',
+    '  config:',
+    '    shellTools: [bash]',
+    '    messageSources: [user, goal]',
+    '    nested: {a: 1, b: [x, y]}',
+    '    empty: []',
+    '    quoted: ["a, b", "c"]',
+  ].join('\n')
+  const parsed = parseYaml(text)
+  assert.equal(parsed.ok, true, JSON.stringify(parsed.errors))
+  const config = parsed.value[0].config
+  assert.deepEqual(config.shellTools, ['bash'])
+  assert.deepEqual(config.messageSources, ['user', 'goal'])
+  assert.deepEqual(config.nested, { a: 1, b: ['x', 'y'] })
+  assert.deepEqual(config.empty, [])
+  assert.deepEqual(config.quoted, ['a, b', 'c'])
+  // A collection that spills across lines is refused by name, never silently
+  // truncated: half a tool list would mount as a preset the user did not write.
+  const split = parseYaml('- id: a\n  config:\n    tools: [\n      bash,\n    ]\n')
+  assert.equal(split.ok, false)
+  assert.match(String(split.errors[0] && split.errors[0].message), /流式/)
 })
 
 // --- create -----------------------------------------------------------------
@@ -572,7 +736,7 @@ test('save: a rejected edit leaves the file byte-for-byte untouched', async (t) 
 
   const broken = await world.ops.save({ id: 'mine', text: '- id: persona\n  name: [1\n' })
   assert.equal(broken.ok, false)
-  assert.match(broken.error, /^第 \d+ 行：unsupported YAML feature/)
+  assert.match(broken.error, /^第 \d+ 行：流式/)
 
   const commentOnly = await world.ops.save({ id: 'mine', text: '# 只有注释\n' })
   assert.equal(commentOnly.ok, false)
@@ -609,7 +773,7 @@ test('remove: asks once, then undeclares, forgets the id and deletes the dir', a
   const world = makeWorld(t)
   const registry = adoptRegistry(world)
   writePreset(world, 'mine', { metadata: SAMPLE_METADATA, composition: compositionText(SAMPLE_ROWS) })
-  world.ops.applyEnabled('mine', true)
+  await world.ops.applyEnabled('mine', true)
 
   const asked = await world.ops.remove({ id: 'mine' })
   assert.equal(asked.ok, false)
@@ -937,4 +1101,45 @@ test('http: a GET-only state route never writes, and an empty POST body is allow
       assert.equal(response.json.presets.length, 1)
       assert.equal(response.json.restore, null)
     })
+})
+
+// --- regression: a probe resolves, it never imports --------------------------
+//
+// The first shipped version probed a row with `load(spec) { return import(spec) }`
+// called synchronously. import() returns a truthy promise, so every row looked
+// healthy, and the rejection of a missing package nobody awaited escaped as an
+// unhandled rejection: the launcher printed
+//   dsh: fatal load failure: ERR_MODULE_NOT_FOUND … imported from …/src/index.js
+// and the app died on the health check. These tests pin the resolve-only contract.
+
+test('host deps expose resolveSpec and never a module loader', () => {
+  const deps = _module.makeDeps({ baseUrl: undefined, get: () => undefined })
+  assert.equal(deps.load, undefined, 'a module loader here is what killed the launcher')
+  assert.equal(typeof deps.resolveSpec, 'function')
+  const answer = deps.resolveSpec('@deepseek-ai/dsh-package-that-does-not-exist')
+  assert.equal(answer, null, 'an unresolvable name answers null instead of throwing')
+  assert.ok(!(answer && typeof answer.then === 'function'), 'and never a thenable')
+})
+
+test('row health is synchronous, resolution-only, and honest about a null answer', () => {
+  const rows = [{ id: 'persona', name: '@deepseek-ai/dsh-persona' }]
+  let probes = 0
+  const hit = checkRowNames(rows, {
+    baseDir: process.cwd(),
+    resolve: (spec) => { probes += 1; return path.join('/fake', spec) },
+    exists: () => true,
+  })
+  assert.equal(probes, 1)
+  assert.equal(hit[0].level, 'ok')
+
+  // A resolver answering null is NOT a healthy row — with import() it always was.
+  const miss = checkRowNames(rows, { baseDir: process.cwd(), resolve: () => null, exists: () => true })
+  assert.equal(miss[0].level, 'unavailable')
+  assert.match(miss[0].reason, /解析器没有找到该包/)
+  assert.match(miss[0].reason, /@deepseek-ai\/dsh-persona/)
+
+  // No resolver at all is reported, never guessed.
+  const none = checkRowNames(rows, { baseDir: process.cwd(), exists: () => true })
+  assert.equal(none[0].level, 'unavailable')
+  assert.match(none[0].reason, /没有可用的模块解析器/)
 })

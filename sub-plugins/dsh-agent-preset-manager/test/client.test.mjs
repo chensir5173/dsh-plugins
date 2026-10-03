@@ -183,3 +183,48 @@ test('client: a rejected state answer surfaces the host error and keeps renderin
   const lines = texts(tree).join(' | ')
   assert.equal(lines.indexOf('内部错误：磁盘只读') >= 0, true, lines)
 })
+
+// 开关是 toggle 形态：role=switch + aria-checked 反映真实状态，滑块本体必须可见。
+// 真机反馈「开关不好辨认」的根因有两处：开启态轨道用了文字色（label-primary，深色
+// 主题下近白），以及 knob 是 span 却没设 display:block —— inline 元素会忽略
+// width/height，圆点根本不渲染，轨道里就只剩一条色块。
+function flatten(node, out = [], depth = 0) {
+  if (node === null || node === undefined || node === false) return out
+  if (Array.isArray(node)) { for (const child of node) flatten(child, out, depth); return out }
+  if (typeof node !== 'object' || node.type === undefined) return out
+  if (typeof node.type === 'function') {
+    if (depth >= 4) return out
+    let child = null
+    try { child = node.type(node.props || {}) } catch (error) { return out }
+    return flatten(child, out, depth + 1)
+  }
+  out.push(node)
+  for (const child of node.children || []) flatten(child, out, depth)
+  return out
+}
+
+test('client: every preset card exposes a toggle that shows its own state', async () => {
+  const harness = loadClient(STATE_PAYLOAD)
+  const seen = { panel: null }
+  harness.client.apply({
+    slots: {
+      inject(name, callback) { callback() },
+      register(spec, Component) { seen.panel = Component; return () => {} },
+    },
+  })
+  const tree = await harness.render(seen.panel)
+  const switches = flatten(tree).filter((node) => (node.props || {}).role === 'switch')
+  assert.equal(switches.length, 2, 'one toggle per preset card')
+  const on = switches[0].props
+  const off = switches[1].props
+  assert.equal(on['aria-checked'], 'true', 'an enabled preset reads as checked')
+  assert.equal(off['aria-checked'], 'false', 'a disabled preset reads as unchecked')
+  assert.equal(on['aria-pressed'], undefined, 'switch semantics replaced the old pressed-button semantics')
+  assert.match(String(on.style.background), /brand-primary/, 'the on track uses the brand colour: ' + String(on.style.background))
+  assert.match(String(off.style.background), /border-l3/, 'the off track stays muted: ' + String(off.style.background))
+  const onKnob = (switches[0].children || [])[0]
+  const offKnob = (switches[1].children || [])[0]
+  assert.equal(onKnob.props.style.display, 'block', 'the knob must be a block element or its size is ignored')
+  assert.equal(onKnob.props.style.transform, 'translateX(16px)', 'the knob slides right when on')
+  assert.equal(offKnob.props.style.transform, 'translateX(0)', 'the knob sits left when off')
+})

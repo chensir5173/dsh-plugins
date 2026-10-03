@@ -29,6 +29,10 @@ curl -s http://127.0.0.1:19387/__dsh-agent-presets/state | head -c 400
 - [ ] 1.4 `[B]` 把 `state.json` 里的 `enabled` 手工塞一个不存在的 id → 面板出现「目录不存在」的伪行（可见即可恢复，不用猜）
 - [ ] 1.5 `[B]` `preset.yml` 写成非法 YAML（如 `name: [1`）→ 卡片照常显示，并提示元数据错误；该预设的状态**不会**因此变成「组合有问题」
 - [ ] 1.6 `[B]` 筛选按钮「全部 / 已启用 / 未启用 / 有问题」逐一切换 → 列表按状态收敛；筛选后没有匹配项时显示「没有符合筛选条件的预设。」
+- [ ] 1.7 `[B]` 回归（2026-10-02 真机 fatal）：组合里放**官方包名**行（`- id: persona` + `name: '@deepseek-ai/dsh-persona'`）→ 打开 tab 与点「刷新」都**不会**让 `dsh` 进程退出（旧版会打印 `dsh: fatal load failure: ERR_MODULE_NOT_FOUND … imported from …/dsh-agent-preset-manager/src/index.js`）；官方包行显示「包可解析」，写错的包名行显示「无法解析：解析器没有找到该包（包名 …）」
+
+- [ ] 1.8 `[B]` 回归（相对路径行）：组合里写 `- id: tool-bootstrap` + `name: ./tool-bootstrap.mjs`（该文件确实在预设目录里）→ 启用成功；宿主侧该预设可用（新建会话时能选到），且 `agent.cordis.yml` 内容**未被改写**（仍是 `./tool-bootstrap.mjs`）
+- [ ] 1.9 `[B]` 回归（`!!js` 值）：组合里写 `disabled: !!js process.platform === 'win32'` → 在 Windows 上该行确实被禁用（宿主拿到的是布尔，不是 `{__js: …}` 对象）；把表达式写坏成 `disabled: !!js (((` → 启用被拒，错误含「!!js 表达式无法求值：(((（…）」，`state.json` 不变
 
 ## 2. 运行期声明（启用/停用）
 
@@ -40,6 +44,10 @@ curl -s http://127.0.0.1:19387/__dsh-agent-presets/state | head -c 400
 - [ ] 2.6 `[B]` 构造组合为空（只有注释的 `agent.cordis.yml`）→ 启用被拒（「组成是空的，没有可以声明的插件行。」），开关保持关闭
 - [ ] 2.7 `[B]` 在 DSH 0.1.x（无 `agentPresets` 服务）上打开面板 → 横幅显示「当前 DSH 版本不支持运行期声明，只能查看与编辑」，点开关得到明确不可用原因，磁盘与 `state.json` 都不变
 - [ ] 2.8 `[B]` 把预设目录改名/删掉后点启用 → 拒绝并提示「找不到这个预设的目录，无法启用：<id>」，不留半声明
+
+- [ ] 2.9 `[B]` 回归（异步声明，2026-10-02）：点开关启用 → **立即成功**（不再报「注册表没有返回撤销函数，无法保证「停用」可用，已拒绝这次启用。」），`state.json` 写入该 id；随后让宿主里出现同名声明再点启用 → 面板显示失败文案「宿主注册预设失败：Duplicate agent preset: …（宿主里已经有一个同名声明）」，**`dsh` 进程不退出**（旧版这里会以 `fatal load failure` 退出）
+- [ ] 2.10 `[B]` 重启 `dsh web` 后立刻打开面板 → 若恢复还没跑完，`GET /state` 的 `restorePending` 为 `true`（面板显示恢复中）；稍后刷新 → `restore.restored` 含该 id，`restorePending` 为 `false`
+- [ ] 2.11 `[B]` 卡片右侧开关是 **toggle 形态**（2026-10-02 真机反馈「不好辨认」后改）：未启用时轨道灰（`--dsw-alias-border-l3`）、圆点靠左；已启用时轨道品牌色（`--dsw-alias-brand-primary`）、圆点右移 16px 并带阴影；两种状态一眼可辨，键盘可聚焦，读屏把这颗按钮念成「开关」而不是「已按下」
 
 ## 3. 新增与编辑
 
