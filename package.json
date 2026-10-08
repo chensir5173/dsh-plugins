@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-manager",
-  "version": "0.3.8",
+  "version": "0.3.9",
   "description": "Installation shell for the dsh-plugins monorepo. Installing THIS repository — by path, or from git with `dsh plugin --profile web add git+https://github.com/Chen5173/dsh-plugins.git` — installs exactly one plugin, dsh-plugin-manager, whose Settings > 本地插件 panel scans sub-plugins/ and manages every dsh-* sibling (activate / disable / remove / one-click migration). This root manifest declares no dependencies and owns no activation rows: it only forwards main / exports / dsh.client to dsh-plugin-manager/src/* and points dsh.bundle.patch at dsh-plugin-manager/cordis.patch.yml, so `add <repo root>` is equivalent to `add <repo root>/dsh-plugin-manager`. Constraints enforced by dsh-plugin-manager/test/root-install-shell.test.mjs.",
   "type": "module",
   "private": true,

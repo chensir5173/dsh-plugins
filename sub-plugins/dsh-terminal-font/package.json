@@ -1,0 +1,40 @@
+{
+  "name": "dsh-terminal-font",
+  "version": "0.1.0",
+  "description": "Fixes tofu (乱码) glyphs in the DSH sidebar terminal without touching font-size or the DOM renderer. The core terminal (dsh-client-ui-sidebar-terminal) hard-codes 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace' at 13px, and on Windows that resolves to Consolas, whose cmap has no Nerd Font private-use glyphs — so oh-my-posh Powerline separators (U+E0B0), branch icons (U+F015) and locks (U+E0A0) render as boxes. This plugin injects two @font-face rules that bind the locally installed Nerd Fonts (0xProto Nerd Font Mono, Sarasa Term SC Nerd) through local() with size-adjust factors chosen so the rendered advance equals Consolas 13px exactly (7.1474609375px); because xterm measures and renders with the same family string, cell math, column count and the cursor grid stay untouched, and CJK stays exactly 2 cells wide. Ships through the core 'webserver/index-inject' seam (works for both dsh web and desktop), plus a Settings > 本地插件 tab that diagnoses whether the CSS reached the page, whether each FontFace resolved, and whether the measured terminal cell width still matches the Consolas target, and lets you override the font names / size-adjust percentages.",
+  "type": "module",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "dsh-plugin",
+    "dsh",
+    "cordis",
+    "terminal",
+    "font",
+    "nerd-font",
+    "powerline",
+    "xterm",
+    "sidebar"
+  ],
+  "files": [
+    "src/",
+    "README.md",
+    "ACCEPTANCE.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./client": "./src/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web"
+    }
+  }
+}

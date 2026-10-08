@@ -29,6 +29,7 @@ dsh plugin --profile web add <本机仓库根>                                  
 | [`dsh-hindsight-model`](../sub-plugins/dsh-hindsight-model/README.md) | 看清 **Hindsight 守护进程**当前跑的是哪个模型、改掉它，**启停它**，并按需自动拉起 —— 四层对照（落盘 / 进程实际生效 / 外层冲突源 / 生效判据） | 设置 → **Hindsight 模型** | 宿主 + 客户端 | 需 `webServer` 与 `~/.hindsight/coding-agent.json`；缺失时只禁用对应区块，其余照常 |
 | [`dsh-idle-hook`](../sub-plugins/dsh-idle-hook/README.md) | 模型不在运行时（一轮结束 / 等待批准 / 等待回答）按规则执行**本机脚本**（py/bat/ps1/sh/可执行），把通知送到页面关掉也能到的地方 | 设置 → **空闲通知** | 宿主 + 客户端 | 需 `settings` 服务读规则与 `webServer` 提供设置页/心跳；二者缺席时降级为「无规则不触发」，宿主半照常加载 |
 | [`dsh-agent-preset-manager`](../sub-plugins/dsh-agent-preset-manager/README.md) | 让**本地目录里的 agent preset** 在 0.2.0 上继续可用：运行期声明进宿主注册表，可开关 / 新增 / 编辑 / 删除 / 导入 / 迁移 | 设置 → **本地插件** → tab「Agent 预设」 | 宿主 + 客户端 | 需宿主提供 `agentPresets` 注册表服务（缺席即只读）；不碰 profile 配置 |
+| [`dsh-terminal-font`](../sub-plugins/dsh-terminal-font/README.md) | 把本机已装的 **Nerd Font** 接进侧边栏终端字体栈（`@font-face` + `size-adjust` 归一），修掉 oh-my-posh 提示符的豆腐块 | 自动：样式进页面 `<head>`；设置 →「本地插件」→ tab「终端字体」看诊断 / 改字体 | 客户端 + 空壳宿主（注入样式） | 本机需装 `0xProto Nerd Font (Mono)` 与 `Sarasa Term SC Nerd`；**桌面版须重启 DSH Desktop** |
 
 ## 逐个怎么说"怎么用"
 
@@ -88,6 +89,15 @@ dsh plugin --profile web add <本机仓库根>                                  
 - **能操作什么**：点组头的 chevron 折叠/展开该桶，折叠态持久化（刷新仍记住）。
 - **明确保留的核心原生行为**：状态点、悬停提示卡、行尾 `⋯` 菜单、点行打开、拖拽排序——插件一律不接管。窄栏（rail）不激活。
 - **实现约束值得知道**：它读核心的 localStorage 视图状态 `dsh.workspace.view.v5` 判定是否激活，并会按「桶序 + updatedAt」重排官方行；核心「+新会话」复用空白旧会话的特例被单独处理（始终落在「今天」且桶内最新）。行身份按**核心实际渲染的文案**匹配（空白行=「新会话」、无标题行=「未命名」/`Untitled`、其余=标题），读不到标题的行只当空隙、不会把同一时间桶拆成两个同名组头。
+
+### dsh-terminal-font — 侧边栏终端字体（修豆腐块）
+
+- **为什么需要它**：核心把终端字体写死在 `ui-sidebar-terminal`（`fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace'` + `fontSize: 13`），本机实际落到 **Consolas**，而它的 cmap **没有 Nerd Font 私用区字形** ⇒ oh-my-posh 的 Powerline / 分支 / 锁图标全是方块。核心既无 `Config`、也无 CSS 变量可改。
+- **插件怎么修**：向页面 `<head>` 注入两段 `@font-face`（`local()` 引用本机字体 + `size-adjust` 把 advance 精确归一到 `13px × 1126/2048 = 7.1474609375px`）与一条 `.xterm-rows / .xterm .composition-view` 字体栈规则。**xterm 用同一个 fontFamily 字符串既渲染又度量**，所以必须归一而不是简单换字体名 —— 否则列宽、竖线、光标全部错位；字体缺失时 @font-face 失效、回退 Consolas，逐像素等于没装。
+- **何时生效**：Web 刷新页面；**桌面版必须重启 DSH Desktop**（桌面 host 只在 app ready 收集一次 `webserver/index-inject`）。
+- **设置页**：设置 →「本地插件」→ tab「终端字体」（`settings.localPlugins.tab`，order 46）。诊断卡给「CSS 注入 / Nerd Font 字形 / 中文字体 / 终端字号 / 终端单元格宽度 / 终端字体栈」；设置卡写 profile 条目 `config:` 的 `enabled` / `monoFont` / `cjkFont` / `monoSizeAdjust` / `cjkSizeAdjust`（默认 `88.6781` / `109.9609`）。
+- **没有字号输入框**：13px 是核心硬编码，xterm 的字符尺寸缓存也建立在同一个字号上；改 CSS `font-size` 会让 DOM 渲染与 xterm 的度量脱钩，而用 `size-adjust` 反向补偿又会把字形整体缩放回去、视觉等于没改 ⇒ 字号只读展示，可调的是 `size-adjust`。
+- **已知限制**：Powerline / 方块字形上下各被裁约 1.5px（行高由字体包围盒锁定、写在行元素内联样式上）。
 
 ### ~~dsh-open-session-workdir — 打开会话工作目录~~（已退役 2026-09-18）
 
