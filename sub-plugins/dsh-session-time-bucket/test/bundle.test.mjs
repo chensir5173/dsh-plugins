@@ -120,19 +120,22 @@ test('workspaceTitleBySession maps membership to titles', () => {
 
 test('collectRows applies core-equivalent visibility', () => {
   const byId = {
-    a: { id: 'a', displayTitle: '会话A', updatedAt: nowMs, blank: false },
+    a: { id: 'a', displayTitle: '会话A', title: '会话A', updatedAt: nowMs, blank: false },
     b: { id: 'b', displayTitle: '子代理', updatedAt: nowMs, origin: 'subagent', blank: false },
     c: { id: 'c', displayTitle: '别的空白', updatedAt: nowMs, blank: true },
     d: { id: 'd', displayTitle: '当前空白', updatedAt: nowMs, blank: true },
     e: { id: 'e', displayTitle: '已归档', updatedAt: nowMs, blank: false },
-    f: { id: 'f', displayTitle: '', updatedAt: nowMs, blank: false },
-    g: { id: 'g', displayTitle: '运行中', updatedAt: nowMs, blank: false, running: true },
-    h: { id: 'h', displayTitle: '已完成', updatedAt: nowMs, blank: false, completed: true },
+    f: { id: 'f', displayTitle: '', title: '', updatedAt: nowMs, blank: false },
+    g: { id: 'g', displayTitle: '运行中', title: '运行中', updatedAt: nowMs, blank: false, running: true },
+    h: { id: 'h', displayTitle: '已完成', title: '已完成', updatedAt: nowMs, blank: false, completed: true },
+    // No `title` key at all: core >= 0.2.0-rc.2 renders 未命名 while the
+    // snapshot displayTitle still names the workspace directory.
+    i: { id: 'i', displayTitle: 'dsh-tmp', updatedAt: nowMs, blank: false },
   }
   const list = { byId, current: 'd' }
   const rows = collectRows(list, ['e'], workspaceTitleBySession([{ workspaceId: 'w', title: 'ws-a', sessionIds: ['a'] }]))
   const ids = rows.map((row) => row.id).sort()
-  assert.deepEqual(ids, ['a', 'd', 'f', 'g', 'h'])
+  assert.deepEqual(ids, ['a', 'd', 'f', 'g', 'h', 'i'])
   const a = rows.find((row) => row.id === 'a')
   const d = rows.find((row) => row.id === 'd')
   assert.equal(a.wsTitle, 'ws-a')
@@ -143,6 +146,13 @@ test('collectRows applies core-equivalent visibility', () => {
   assert.equal(d.wsTitle, undefined)
   const f = rows.find((row) => row.id === 'f')
   assert.equal(f.title, '')
+  assert.equal(f.untitled, true)
+  const i = rows.find((row) => row.id === 'i')
+  // Display keeps the directory-name fallback; the flag drives DOM matching.
+  assert.equal(i.title, 'dsh-tmp')
+  assert.equal(i.untitled, true)
+  assert.equal(a.untitled, false)
+  assert.equal(d.untitled, false)
   const g = rows.find((row) => row.id === 'g')
   assert.equal(g.running, true)
   assert.equal(g.completed, false)
@@ -280,6 +290,34 @@ test('matchRowTitles aligns DOM order to recency order, incl. duplicates and bla
   assert.deepEqual(matchRowTitles(['不存在', '写插件'], rows, '新会话').map((r) => (r ? r.id : null)), [null, 't2'])
 })
 
+test('untitled rows match the core Untitled label, not the directory name', () => {
+  // Regression for the duplicated bucket headers in desktop 0.2.0-rc2: the
+  // snapshot displayTitle of a titleless session is the workspace directory
+  // name (dsh-tmp) while the core row renders 未命名, so every such row stayed
+  // unmapped -> the partial-mapping path forked one header per bucket fragment.
+  const mk = (id, title, updatedAt, extra) => ({ id, title, updatedAt, blank: false, ...extra })
+  const rows = sortRowsByRecency([
+    mk('u1', 'dsh-tmp', 5000, { untitled: true }),
+    mk('named', '写插件', 4000),
+    mk('u2', 'dsh-tmp', 3000, { untitled: true }),
+  ])
+  const domTitles = ['未命名', '写插件', '未命名']
+  assert.deepEqual(
+    matchRowTitles(domTitles, rows, '新会话', '未命名').map((r) => (r ? r.id : null)),
+    ['u1', 'named', 'u2'],
+  )
+  // The English core renders Untitled; the label is whatever the core passes.
+  assert.deepEqual(
+    matchRowTitles(['Untitled', '写插件'], rows, 'New Session', 'Untitled').map((r) => (r ? r.id : null)),
+    ['u1', 'named'],
+  )
+  // Without the core label the old behaviour is explicit: no mapping at all.
+  assert.deepEqual(
+    matchRowTitles(domTitles, rows, '新会话').map((r) => (r ? r.id : null)),
+    [null, 'named', null],
+  )
+})
+
 test('planBuckets groups contiguous render-order keys into fold runs', () => {
   assert.deepEqual(planBuckets(['today', 'today', 'yesterday', 'today', null, 'older', 'older']), [
     { key: 'today', count: 2, index: 0 },
@@ -289,6 +327,48 @@ test('planBuckets groups contiguous render-order keys into fold runs', () => {
   ])
   assert.deepEqual(planBuckets([]), [])
   assert.deepEqual(planBuckets([null, null]), [])
+  // An unmapped row is a gap, not a boundary: it used to end the run and the
+  // renderer then emitted one header per fragment (前7天 … 前7天 in the GUI).
+  assert.deepEqual(planBuckets(['last7', null, 'last7', 'older']), [
+    { key: 'last7', count: 2, index: 0 },
+    { key: 'older', count: 1, index: 3 },
+  ])
+  assert.deepEqual(planBuckets([null, 'today', null, null, 'today']), [{ key: 'today', count: 2, index: 1 }])
+  // A genuine key change still starts a new run, and the count only counts rows.
+  assert.deepEqual(planBuckets(['today', null, 'older']), [
+    { key: 'today', count: 1, index: 0 },
+    { key: 'older', count: 1, index: 2 },
+  ])
+})
+
+test('a gap in the row mapping cannot duplicate a bucket label end-to-end', () => {
+  // The reported GUI symptom: 前7天 rendered twice because one unmapped row sat
+  // between two rows of the same bucket. Replay the exact decision chain the
+  // renderer runs (matched rows -> bucket keys -> fold runs -> header identities).
+  const mk = (id, title, updatedAt, extra) => ({ id, title, updatedAt, blank: false, ...extra })
+  const rows = sortRowsByRecency([
+    mk('n1', '写插件', nowMs - 3600 * 1000),
+    mk('n2', 'publish', startToday - 2 * DAY),
+    mk('n3', 'dsh-tmp', startToday - 3 * DAY, { untitled: true }),
+    mk('o1', '旧会话', startToday - 40 * DAY),
+  ])
+  const mapped = matchRowTitles(['写插件', 'publish', '未命名', '旧会话'], rows, '新会话', '未命名')
+  assert.deepEqual(mapped.map((r) => (r ? r.id : null)), ['n1', 'n2', 'n3', 'o1'])
+  const runs = planBuckets(mapped.map((r) => (r ? bucketKeyOf(bucketTimeOf(r, nowMs), nowMs) : null)))
+  const identities = runs.map((run) => run.key)
+  assert.deepEqual(identities, ['today', 'last7', 'older'])
+  assert.deepEqual(runs.map((run) => run.count), [1, 2, 1])
+  assert.equal(new Set(identities).size, identities.length, 'no bucket label repeats')
+  // The guarded failure mode: ONE row lost to a title the plugin cannot read
+  // (a mid-rename row here). Sitting between two 前7天 rows it used to end the
+  // run, and the same label was then rendered twice.
+  const partial = matchRowTitles(
+    ['写插件', 'publish', '重命名中', '未命名', '旧会话'], rows, '新会话', '未命名',
+  )
+  assert.deepEqual(partial.map((r) => (r ? r.id : null)), ['n1', 'n2', null, 'n3', 'o1'])
+  const partialRuns = planBuckets(partial.map((r) => (r ? bucketKeyOf(bucketTimeOf(r, nowMs), nowMs) : null)))
+  assert.equal(new Set(partialRuns.map((run) => run.key)).size, partialRuns.length)
+  assert.deepEqual(partialRuns.map((run) => [run.key, run.count]), [['today', 1], ['last7', 2], ['older', 1]])
 })
 
 test('readDomRows finds rows nested under React wrapper spans (live DOM shape)', () => {

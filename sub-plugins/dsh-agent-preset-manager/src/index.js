@@ -379,24 +379,43 @@ function registerRoutes(ctx, host, handlers) {
  * The registry is a parent-realm service, so it is reached through ctx, never
  * imported. Absence is a supported state (DSH 0.1.x): the panel stays usable as
  * a viewer/editor and every write returns an explicit reason.
+ *
+ * Ordering matters: ctx.get('agentPresets') answers nothing while the host is
+ * still composing that side, and "not there yet" is NOT "not supported". The
+ * caller passes onReady so the boot replay runs the moment a registry is really
+ * adopted. Replaying on the early reading is what silently dropped every
+ * declaration of a restart: the pass was refused as "no registry service",
+ * state.json kept saying enabled, and nothing ever retried.
+ *
+ * @returns true only when a registry was adopted synchronously.
  */
-function adoptRegistry(ctx, runtime) {
+function adoptRegistry(ctx, runtime, onReady) {
+  const ready = () => { if (typeof onReady === 'function') onReady() }
   const candidates = []
   if (typeof ctx.get === 'function') candidates.push(ctx.get('agentPresets'))
   const sub = ctx.get('agentPresetsRoot')
   if (sub) candidates.push(sub)
   for (const candidate of candidates) {
     const registry = candidate && candidate.agentPresets ? candidate.agentPresets : candidate
-    if (registry && typeof registry.register === 'function' && runtime.adopt(registry)) return true
+    if (registry && typeof registry.register === 'function' && runtime.adopt(registry)) {
+      ready()
+      return true
+    }
   }
   if (typeof ctx.inject === 'function') {
     try {
       ctx.inject(['agentPresets'], (sub) => {
         const registry = sub && sub.agentPresets ? sub.agentPresets : sub
-        if (registry && typeof registry.register === 'function') runtime.adopt(registry)
+        if (registry && typeof registry.register === 'function' && runtime.adopt(registry)) ready()
       })
+      // The registry can simply be later than us in the composition: the
+      // injection callback above is the answer, so do not settle the replay yet.
+      return false
     } catch { /* older composition: stay read-only */ }
   }
+  // No injection surface at all (0.1.x lines): nothing is coming, so settle now
+  // and let the report say "no registry service" instead of hanging as pending.
+  ready()
   return false
 }
 
@@ -407,6 +426,13 @@ async function restoreEnabled(core) {
   const ids = core.loadState().state.enabled.slice()
   const opsApi = createOperations(deps)
   for (const id of ids) {
+    // A healing pass must not re-declare what this runtime already holds: the
+    // host refuses a duplicate id, and the second pass exists only to retry the
+    // entries an earlier pass could not declare.
+    if (runtime && typeof runtime.getHandles === 'function' && runtime.getHandles().has(id)) {
+      report.restored.push(id)
+      continue
+    }
     report.attempted += 1
     // Declaration is async in 0.2.x (it settles after the preset tree mounted),
     // so each entry is awaited before the next one is declared.
@@ -426,6 +452,10 @@ export function apply(ctx) {
   const boot = { errors: [] }
   let restoreReport = null
   let restoreSettled = false
+  /** Serializes the replays below: two callers, one pass. */
+  let replayInFlight = false
+  /** One healing pass per adopted registry generation (see healReplay). */
+  let healUsed = false
   /** The exact core shape host-core expects (home is a getter, not a value). */
   const core = {
     deps,
@@ -439,22 +469,60 @@ export function apply(ctx) {
       }
     },
   }
-  const migrateRef = () => ({ ok: true, restored: restoreReport, restoredPending: !restoreSettled, state: collectState(core) })
-
-  const mounted = () => {
-    adoptRegistry(ctx, runtime)
-    // Boot must not block on the host: declaring a preset is asynchronous in
-    // 0.2.x, so the report lands a moment later and every reader (/state, the
-    // migrate reply, describe()) picks it up from restoreReport once it is there.
+  /**
+   * The boot replay. Idempotent (restoreEnabled skips ids this runtime already
+   * declared) and serialized, so the injection callback and the healing pass can
+   * both ask for it without declaring anything twice.
+   */
+  const startReplay = () => {
+    if (replayInFlight) return false
+    replayInFlight = true
+    // A pass that is running is not settled: the panel reads this as 恢复中.
+    restoreSettled = false
     void (async () => {
       try {
         restoreReport = await restoreEnabled(core)
       } catch (error) {
         boot.errors.push(String((error && error.message) || error))
       } finally {
+        replayInFlight = false
         restoreSettled = true
       }
     })()
+    return true
+  }
+
+  /**
+   * Repair a report written before the registry could answer. Every reader of
+   * the report (/state, /bootstrap, /migrate) goes through migrateRef, so the
+   * first panel read is also a healing checkpoint: it re-runs the pass an earlier
+   * attempt could not complete. The budget is one extra pass per adopted registry
+   * (adoptRegistry resets it), because a second failure is a real failure, and
+   * retrying it on every poll would rewrite state.json for nothing.
+   */
+  const healReplay = () => {
+    if (replayInFlight) return
+    if (healUsed) return
+    healUsed = true
+    startReplay()
+  }
+
+  const migrateRef = () => {
+    healReplay()
+    return { ok: true, restored: restoreReport, restoredPending: !restoreSettled, state: collectState(core) }
+  }
+
+  const mounted = () => {
+    // The replay is driven by adoption, never by this tick's reading of ctx (see
+    // adoptRegistry). A fresh registry also resets the healing budget: a pass
+    // that failed against the previous one is worth one more try.
+    adoptRegistry(ctx, runtime, () => {
+      healUsed = false
+      startReplay()
+    })
+    // Boot must not block on the host: declaring a preset is asynchronous in
+    // 0.2.x, so the report lands a moment later and every reader (/state, the
+    // migrate reply, describe()) picks it up from restoreReport once it is there.
     const handlers = createHandlers(core, migrateRef)
     const mount = (host) => {
       if (!host || typeof host.register !== 'function') return

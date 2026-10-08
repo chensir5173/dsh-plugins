@@ -1,6 +1,6 @@
 # dsh-session-title-regenerate
 
-给 DSH（DeepSeek Harness）会话加一个「重新生成标题」动作：用**当前模型、最低推理模式**总结该会话**全部用户提问**，生成一个 60 字以内的单行标题并直接覆盖旧标题。
+给 DSH（DeepSeek Harness）会话加一个「重新生成标题」动作：用**当前模型**总结该会话**全部用户提问**，生成一个 60 字以内的单行标题并直接覆盖旧标题。默认**关思考**（`reasoningEffort: 'off'`，不把思考 token 花在标题上）、输出上限 **512 token**；两者都能在 设置 → 本地插件 →「重新生成标题」 面板里改。
 
 两个入口，共用同一套逻辑：
 
@@ -13,7 +13,7 @@
 ## 工作原理
 
 1. **收集输入**：读会话日志里所有 `user/message`（`source.kind === 'user'`）的文本块，按序拼接、按 UTF-8 字节预算（默认 12 KB）截断。
-2. **最低推理模式**：`ctx.llm.stream` 带 `reasoningEffort: 'off'` + `purpose: 'session-title'`（DeepSeek 适配器对 `session-title` 还会强制 `thinking: disabled`）+ `maxTokens: 100` + 极短提示词。若提供方不支持 `off`（返回 `UNSUPPORTED_REASONING_EFFORT`），自动去掉该字段重试一次。
+2. **推理档位与输出预算受设置控制**：`ctx.llm.stream` 带 `purpose: 'session-title'`（DeepSeek 适配器对 `session-title` 还会强制 `thinking: disabled`）+ `maxTokens`（默认 512）+ 极短提示词。思考**默认关闭**——只有设置里打开「思考」开关，才把所选档位（`low`/`medium`/`high`/`max`）作为 `reasoningEffort` 传下去，关闭时发 `off`（pi-ai 路由会把 `off` 翻成「省略 reasoning 字段」，等价于不思考）。若提供方不支持该档位（返回 `UNSUPPORTED_REASONING_EFFORT`），自动去掉该字段重试一次。
 3. **提示词**：只输出一行纯文本标题、无引号/无 Markdown/无解释、**跟随消息语言**、约 60 个 CJK 字符 / 40 个词。
 4. **写入**：`ctx.sessionTitle.rename(session, title)` ——与核心 `remote.session.rename` 同一公共 API：新标题进入日志、固定标题（来源记为 `user`）、客户端列表经标题投影即时刷新。
 5. **反馈**：成功 Toast「标题已更新：<新标题>」，失败 Toast 透出原因。
@@ -40,6 +40,26 @@
 
 ## 配置
 
+两层：**设置页**（推荐，保存即生效）与 **profile 行 `config:`**（随安装形态走、可写固定 provider/model）。
+
+### 设置页：设置 → 本地插件 → 「重新生成标题」
+
+插件在 `settings.localPlugins.tab` 槽注册了一个 tab（id = entry id `session-title-regenerate`，order 45），读写的就是自己那条 entry 的配置；命名空间就是 entry id，与插件名无关。
+
+| 项 | 默认 | 说明 |
+|---|---|---|
+| 思考开关 | 关 | 唯一的思考开关：关 = 本次调用不下发 `reasoningEffort`（最省 token）；打开后才出现下面的「推理强度」单选 |
+| 推理强度 | 打开后为 `low` | 单选 `low` / `medium` / `high` / `max` **四档**；思考关时这一栏只显示「当前不思考」说明——`off` 不单独成档，因为「关」就等于它 |
+| 输出上限 | `512` | `maxOutputTokens`，允许 16 – 8192；输入过程中不打断，离开输入框时自动夹取 |
+
+底部一行状态区回显**本次调用实际会发什么**（如「本次调用：不下发 reasoningEffort · maxTokens 512」或「…reasoningEffort = high · maxTokens 2048」），并在有未保存改动时显示「● 有未保存的改动。」。
+
+「保存」写进 profile 行 `config:`（宿主半随 entry 重载，即时生效；客户端读的是同一份投影，刷新后回显）；「填入默认值」只把面板填成 思考关 / `off` / 512（需再点「保存」才写盘），「重新读取」丢弃未保存改动。
+
+> ⚠️ `link:` 安装形态下宿主半解析不到 `@deepseek-ai/schemastery`，所以本插件的设置 schema 是**手写**的（`src/index.js` 末尾 `CONFIG_SCHEMA_JSON` + `Config` 导出，手工 `toJSON`/`~standard.validate`）。设置页能读写靠的就是这条手写 schema，与 `dsh-composer-provider-label` 那个「依赖宿主 schemastery、link 形态下失效」的设置段不同。
+
+### profile 行 `config:`
+
 `/regenerate-title` 命令的默认策略见 `src/index.js` 的 `DEFAULTS`，可在 profile 的 cordis patch 行上用 `config:` 覆盖（示例）。该行由管理器面板写入（规范形态 = `- insert: [{ id, name, config?, disabled? }]`）；**在管理器写的这行 insert 项上**手工补的 `config:` 会被保留——开关切换只改 `disabled`（`upsertManaged` 对已存在的 insert 项做 `{ ...item, name }` 后仅增删 `disabled`），所以不要改它的 `id`/`name`。反之，若自己另写一条顶层覆盖行（`- id: session-title-regenerate` + `config:`），首次开关会把它规范化成 insert 项并丢掉那些额外字段 —— 要覆盖配置请直接写在下面这条 insert 项上：
 
 ```yaml
@@ -52,7 +72,9 @@
         targetWords: 40         # 非 CJK 语言目标词数
         targetCjkCharacters: 60 # CJK 目标字数
         maxInputBytes: 12288    # 输入字节预算
-        maxOutputTokens: 100    # 输出 token 上限
+        thinking: false         # 思考开关（= 设置页「思考」；false 时不发 reasoningEffort）
+        reasoningEffort: 'off'  # 思考打开时用的档位：off/low/medium/high/max（= 设置页「推理强度」）
+        maxOutputTokens: 512    # 输出 token 上限（= 设置页「输出上限」，16–8192）
         timeoutMs: 30000        # 单次生成超时
 ```
 
@@ -62,7 +84,7 @@
 node sub-plugins/dsh-session-title-regenerate/test/bundle.test.mjs
 ```
 
-纯 Node 逻辑 harness（无浏览器）：宿主命令 handler（消息收集、最低推理参数、标题规范化、错误/重试/截断/取消路径）+ 客户端（槽位注册、命令触发、标题→id 解析、菜单注入与点击流）。宿主半**不 import 任何宿主包**——消息构造与流装配是 `src/index.js` 内的本地实现——因此测试与运行都不需要 `node_modules`，`link:` 安装也能直接加载。
+31 条断言全绿（宿主 19 + 客户端 12）。纯 Node 逻辑 harness（无浏览器）：宿主命令 handler（消息收集、推理档位解析与夹取、`Config` 投影、标题规范化、错误/重试/截断/取消路径）+ 客户端（槽位注册、命令触发、标题→id 解析、菜单注入与点击流）。宿主半**不 import 任何宿主包**——消息构造与流装配是 `src/index.js` 内的本地实现——因此测试与运行都不需要 `node_modules`，`link:` 安装也能直接加载。
 
 ## 兼容性与风险
 

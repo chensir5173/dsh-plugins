@@ -1,6 +1,6 @@
 # 验收清单 — dsh-agent-preset-manager
 
-逻辑层（库扫描与旧目录优先、行体检分级、组合 YAML 往返、状态文件读写、启用/停用与注册表句柄、启用失败回滚、新增骨架播种、保存校验 + 备份轮换 + 原子写、删除二次确认与撤声明、导入 preflight、迁移 plans 与覆盖、HTTP 路由/方法/body/500 兜底、客户端 tab 注册与面板渲染）由 `test/bundle.test.mjs`（31 条）与 `test/client.test.mjs`（4 条）自动覆盖。标 `[B]` 的必须在真实 GUI 人眼/手测。
+逻辑层（库扫描与旧目录优先、行体检分级、组合 YAML 往返、状态文件读写、启用/停用与注册表句柄、启用失败回滚、新增骨架播种、保存校验 + 备份轮换 + 原子写、删除二次确认与撤声明、导入 preflight、迁移 plans 与覆盖、HTTP 路由/方法/body/500 兜底、客户端 tab 注册与面板渲染）由 `test/bundle.test.mjs`（42 条）与 `test/client.test.mjs`（4 条）自动覆盖。标 `[B]` 的必须在真实 GUI 人眼/手测。
 
 架构重点：**磁盘目录是唯一真源**，启用 = 运行期 `agentPresets.register(...)`，插件**绝不改写 profile 的 `cordis.patch.yml`**。
 
@@ -38,7 +38,7 @@ curl -s http://127.0.0.1:19387/__dsh-agent-presets/state | head -c 400
 
 - [ ] 2.1 `[B]` 在可用运行时点开关启用某预设 → 卡片变「已启用」；`~/.dsh/agent-preset-manager/state.json` 的 `enabled` 出现该 id；会话侧该预设可被选用
 - [ ] 2.2 `[B]` 再点一次停用 → 卡片回「未启用」，`state.json` 的 `enabled` 里该 id 消失；宿主侧声明随之撤销
-- [ ] 2.3 `[B]` 启用后重启 `dsh web` → 面板里该预设仍是「已启用」（启动时按 `state.json` 重新声明）；`GET /state` 的 `restore` 字段回报 `restored` 含该 id
+- [ ] 2.3 `[B]` 启用后重启 `dsh web` → 面板里该预设仍是「已启用」（启动时按 `state.json` 重新声明）；`GET /state` 的 `restore` 字段回报 `restored` 含该 id。**重放等注册表就绪**：注册表服务比本插件晚组合时声明依然会发生，不会在启动那一刻被误判成「当前 DSH 版本没有 agent preset 注册表服务」
 - [ ] 2.4 `[B]` 首次运行（删掉 `state.json`）重启 → 没有任何预设被自动启用（`restore.attempted === 0`）
 - [ ] 2.5 `[B]` 让宿主出现同名声明（同一 id 从两处声明）→ 启用被拒，错误文案带「（宿主里已经有一个同名声明）」，`state.json` 未被写入
 - [ ] 2.6 `[B]` 构造组合为空（只有注释的 `agent.cordis.yml`）→ 启用被拒（「组成是空的，没有可以声明的插件行。」），开关保持关闭
@@ -48,6 +48,7 @@ curl -s http://127.0.0.1:19387/__dsh-agent-presets/state | head -c 400
 - [ ] 2.9 `[B]` 回归（异步声明，2026-10-02）：点开关启用 → **立即成功**（不再报「注册表没有返回撤销函数，无法保证「停用」可用，已拒绝这次启用。」），`state.json` 写入该 id；随后让宿主里出现同名声明再点启用 → 面板显示失败文案「宿主注册预设失败：Duplicate agent preset: …（宿主里已经有一个同名声明）」，**`dsh` 进程不退出**（旧版这里会以 `fatal load failure` 退出）
 - [ ] 2.10 `[B]` 重启 `dsh web` 后立刻打开面板 → 若恢复还没跑完，`GET /state` 的 `restorePending` 为 `true`（面板显示恢复中）；稍后刷新 → `restore.restored` 含该 id，`restorePending` 为 `false`
 - [ ] 2.11 `[B]` 卡片右侧开关是 **toggle 形态**（2026-10-02 真机反馈「不好辨认」后改）：未启用时轨道灰（`--dsw-alias-border-l3`）、圆点靠左；已启用时轨道品牌色（`--dsw-alias-brand-primary`）、圆点右移 16px 并带阴影；两种状态一眼可辨，键盘可聚焦，读屏把这颗按钮念成「开关」而不是「已按下」
+- [ ] 2.12 `[B]` 重启后若首轮重放没成功（例如预设目录当时不在），**打开面板的那一刻** `GET /state` 会补跑一次：该响应 `restorePending` 为 `true` 且仍带上一轮的失败报告；把目录放回去再刷新 → `restore.restored` 含该 id；反复刷新不会重复声明（`runtime.declared` 里该 id 只出现一次）
 
 ## 3. 新增与编辑
 

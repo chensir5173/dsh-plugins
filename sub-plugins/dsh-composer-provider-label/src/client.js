@@ -199,15 +199,32 @@ window.__ModuleLoader__.load({
     const SEP = ' · '
     /** Scope class on the menu wrapper; the injected stylesheet keys off it. */
     const PICKER_CLASS = 'cpl-picker'
+    /**
+     * Scope class handed to the primitive's `listClassName`: the only style hook
+     * that reaches the dropdown card itself. The primitive's `className` lands on
+     * the anchor wrapper, and core's `MenuSurface` renders a decorative material
+     * backdrop as the card's FIRST child — so a `> div:first-child` rule hits the
+     * backdrop and never bounds the items area.
+     */
+    const LIST_CLASS = 'cpl-picker-list'
     const STYLE_ID = 'dsh-composer-provider-label-style'
     /**
-     * Visible height of the scrolling items area: five dense rows (34px) plus the
-     * back row (34px), its separator (9px) and the card padding (8px) ≈ 224px.
-     * A longer list scrolls inside the card instead of growing past the viewport
-     * (in-place cards have no viewport clamping, so an unbounded list would push
-     * its own first rows off screen).
+     * Card height cap that keeps five stacked rows visible; the back row and the
+     * pinned footer stay reachable, and a longer list scrolls inside the card
+     * instead of growing past the viewport (in-place cards get no viewport
+     * clamping, so an unbounded list pushes its own first rows off screen).
+     * Geometry from ui-primitives Menu.module.css at `dense: true`: stacked row
+     * 46px (20px label + 2px gap + 16px detail + 2x4px padding), plain row 30px
+     * (its min-height), separator 7px, pinned footer 67px, card padding 8px.
      */
-    const LIST_MAX_HEIGHT = 224
+    const ROW_STACKED_HEIGHT = 46
+    const ROW_PLAIN_HEIGHT = 30
+    const SEPARATOR_HEIGHT = 7
+    const FOOTER_HEIGHT = 67
+    const CARD_PADDING = 8
+    const LIST_VISIBLE_ROWS = 5
+    const LIST_MAX_HEIGHT = LIST_VISIBLE_ROWS * ROW_STACKED_HEIGHT
+      + ROW_PLAIN_HEIGHT + SEPARATOR_HEIGHT + FOOTER_HEIGHT + CARD_PADDING
 
     // --- locale ---------------------------------------------------------------
 
@@ -378,11 +395,15 @@ window.__ModuleLoader__.load({
     var __styleInjected = false
 
     /**
-     * Cap the menu's scrolling area once per page. The core Menu primitive owns
-     * the card's DOM, so the only way to bound its height is a scoped rule; the
-     * selector is anchored to the className we hand the primitive, so it cannot
-     * leak onto other menus. A missing head (tests, exotic clients) is a silent
-     * skip: the primitive's own viewport cap still applies.
+     * Cap the menu card once per page. The core Menu primitive owns the card's
+     * DOM, so the only way to bound its height is a scoped rule. Two anchors keep
+     * it honest: `listClassName` puts the scope class on the card itself, and
+     * `[role="menu"]` outranks the primitive's own `.scrollable` cap whatever the
+     * sheet order. The second rule keeps the items area scrolling (the card is a
+     * flex column, so the cap lands on the items area while the footer stays put)
+     * even if a future primitive drops its own overflow rule. A missing head
+     * (tests, exotic clients) is a silent skip: the primitive's own viewport cap
+     * still applies.
      */
     function ensureStyleSheet() {
       if (__styleInjected) return
@@ -394,8 +415,10 @@ window.__ModuleLoader__.load({
         if (typeof doc.getElementById === 'function' && doc.getElementById(STYLE_ID)) return
         const style = doc.createElement('style')
         style.id = STYLE_ID
-        style.textContent = '.' + PICKER_CLASS + ' [role="menu"] > div:first-child {'
-          + ' max-height: ' + LIST_MAX_HEIGHT + 'px; overflow-y: auto; }'
+        // The viewport is the presentation child that is NOT the pinned footer.
+        const card = '[role="menu"].' + LIST_CLASS
+        style.textContent = card + ' { max-height: ' + LIST_MAX_HEIGHT + 'px; }'
+          + ' ' + card + ' > div[role="presentation"]:not(:last-child) { overflow-y: auto; }'
         if (typeof head.appendChild === 'function') head.appendChild(style)
       } catch { /* no DOM: the primitive's own viewport cap still applies */ }
     }
@@ -1212,6 +1235,7 @@ window.__ModuleLoader__.load({
         align: 'start',
         dense: true,
         className: PICKER_CLASS,
+        listClassName: LIST_CLASS,
       })
     }
 
@@ -1352,6 +1376,8 @@ window.__ModuleLoader__.load({
       SCOPE_ALL,
       SCOPE_PROVIDER,
       LIST_MAX_HEIGHT,
+      LIST_VISIBLE_ROWS,
+      LIST_CLASS,
       PICKER_CLASS,
     }
 

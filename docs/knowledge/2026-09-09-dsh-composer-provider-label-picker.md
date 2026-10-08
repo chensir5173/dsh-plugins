@@ -22,7 +22,7 @@
 - 正解：**一张卡片内自己管 pane**（`root|provider|model`），每次换 `items`；无 submenu 行时自带 `max-height: calc(100vh - 24px)` + 内部滚动（`Menu.module.css:67-79`），`selectedIds` 免费给勾选，`footer` 常驻不滚动。
 - 定位：**原地渲染 + `side='top'`**（`.root` 是 `position:relative`，卡片 `bottom: calc(100% + 4px)`，高度变化自动跟随）。portal 模式只在打开/滚动/resize 重算位置（`Menu.tsx:109-155`），pane 切换改高度会错位。核心 `ModelSelect` 在同一位置也是原地渲染（`ui-model-selection/src/client/ModelSelect.tsx:240-352`），说明 composer 内可行。
 - 菜单里的行都是 `<button>`：**行内不能再嵌按钮**（重试按钮必须做成单独一行）。
-- **长列表会顶出自己的首行**：原地渲染没有视口夹取，原语的 `max-height: 100vh-24px` 挡不住（卡片向上长 → 顶部越界）。原语没有高度 prop、拿不到卡片 DOM → 唯一可行解是给 `Menu` 传作用域 `className`，再注入一条只作用于它的样式把 `.viewport`（`.list > div:first-child`）压到约五行高并 `overflow-y:auto`；选择器特异性 `(0,2,1)` 稳赢 `.scrollable .viewport`。代价：这是插件唯一的 DOM 写入（一个 `<style>` 元素，无 `document.head` 时静默跳过）。行高参考：dense 行 34px、分组标题 24px、分隔 9px、卡片内边距 8px。
+- **长列表会顶出自己的首行**：原地渲染没有视口夹取，原语的 `max-height` 挡不住（卡片向上长 → 顶部越界）。原语没有高度 prop → 唯一可行解是给 `Menu` 传作用域类名再注入一条样式。⚠️ **2026-10-03 更正**：能到达卡片的 hook 是 `listClassName`（`className` 落在 anchor 包裹 `<span>` 上），且 `MenuSurface` 把装饰性 `.material` 层渲染成卡片的**第一个子 div**，所以旧写法 `.cpl-picker [role="menu"] > div:first-child` 打在背景层上、上限**从未生效**。正确写法、几何数字与排查手法见 [2026-10-03-menu-card-height-cap.md](2026-10-03-menu-card-height-cap.md)。代价不变：这是插件唯一的 DOM 写入（一个 `<style>` 元素，无 `document.head` 时静默跳过）。
 
 ### 3. 槽位
 

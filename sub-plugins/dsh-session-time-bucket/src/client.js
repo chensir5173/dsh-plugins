@@ -54,6 +54,7 @@ window.__ModuleLoader__.load({
       'bucket.older': '更早',
       'ungrouped': '未分组',
       'session.new': '新会话',
+      'session.untitled': '未命名',
       'rel.now': '刚刚',
       'rel.minute': '{n}分钟前',
       'rel.hour': '{n}小时前',
@@ -69,6 +70,7 @@ window.__ModuleLoader__.load({
       'bucket.older': 'Older',
       'ungrouped': 'Ungrouped',
       'session.new': 'New Session',
+      'session.untitled': 'Untitled',
       'rel.now': 'just now',
       'rel.minute': '{n}m ago',
       'rel.hour': '{n}h ago',
@@ -250,6 +252,12 @@ window.__ModuleLoader__.load({
         rows.push({
           id,
           title: s.blank === true ? '' : String(s.displayTitle || s.title || ''),
+          // Core >= 0.2.0-rc.2 renders t('session.untitled') for a session whose
+          // stored title is missing or blank (lib/client.js displayTitle:
+          // node.title || t('session.untitled')), while the snapshot displayTitle
+          // still falls back to the workspace directory name. The flag — not the
+          // display text — is what the DOM matcher must trust.
+          untitled: s.blank === true ? false : !(typeof s.title === 'string' && s.title.trim() !== ''),
           blank: s.blank === true,
           current: id === current,
           running: s.running === true,
@@ -277,19 +285,30 @@ window.__ModuleLoader__.load({
       if (!row || row.blank) return ''
       return '[' + (row.wsTitle ? row.wsTitle : ungroupedLabel) + '] '
     }
+    /** The text the CORE actually renders for a row: the localized New Session
+     *  label for the provisional blank row, the localized Untitled label when
+     *  the session has no stored title, the session title otherwise. Matching
+     *  against the core's own wording — not against the snapshot displayTitle —
+     *  is what keeps render order and snapshot order aligned. */
+    function visibleRowTitle(row, blankLabel, untitledLabel) {
+      if (!row) return ''
+      if (row.blank) return blankLabel
+      if (row.untitled === true) return untitledLabel || row.title || ''
+      return row.title
+    }
     /** Align DOM row titles (read in render order) with known sessions.
      *  `rows` must be recency-sorted (core render order); titles are matched
      *  in order, so duplicated titles map newest-DOM-row -> newest session.
-     *  `blankLabel` is the localized New Session row title. */
-    function matchRowTitles(domTitles, rows, blankLabel) {
+     *  `blankLabel` is the localized New Session row title and `untitledLabel`
+     *  the localized Untitled row title (both as the core renders them). */
+    function matchRowTitles(domTitles, rows, blankLabel, untitledLabel) {
       const used = new Set()
       const out = []
       for (const t of domTitles || []) {
         let hit = null
         for (const r of rows || []) {
           if (used.has(r.id)) continue
-          const visible = r.blank ? blankLabel : r.title
-          if (visible === t) { hit = r; break }
+          if (visibleRowTitle(r, blankLabel, untitledLabel) === t) { hit = r; break }
         }
         if (hit) used.add(hit.id)
         out.push(hit)
@@ -297,13 +316,17 @@ window.__ModuleLoader__.load({
       return out
     }
     /** Contiguous bucket runs over the render-order row keys. A missing key
-     *  (unmapped row) ends the current run; rows are never reordered. */
+     *  (unmapped row) does NOT end the current run: it contributes no header of
+     *  its own, and the run it interrupts keeps collapsing into one header.
+     *  Ending the run here used to fork one header per fragment, so an unmapped
+     *  row in the middle of a bucket rendered that bucket label twice in a row.
+     *  Rows are never reordered and a run always counts its mapped rows only. */
     function planBuckets(keys) {
       const runs = []
       let cur = null
       for (let i = 0; i < (keys ? keys.length : 0); i++) {
         const key = keys[i]
-        if (!key) { cur = null; continue }
+        if (!key) continue
         if (cur && cur.key === key) { cur.count++; continue }
         cur = { key, count: 1, index: i }
         runs.push(cur)
@@ -655,7 +678,9 @@ window.__ModuleLoader__.load({
 
       // Row identity: render order == core recency order; titles confirm it.
       // Duplicated titles map sequentially (newest DOM row -> newest session).
-      const mapped = matchRowTitles(domRows.map((d) => d.titleText), rows, __t('session.new'))
+      const mapped = matchRowTitles(
+        domRows.map((d) => d.titleText), rows, __t('session.new'), __t('session.untitled'),
+      )
 
       // Detach enhancements from rows that went away / unmapped, then apply.
       const old = __mapped
@@ -740,8 +765,9 @@ window.__ModuleLoader__.load({
         }
       } else {
         // Partial mapping fallback: keep render order, anchor headers above
-        // the first row of each contiguous run. Occurrence identities keep
-        // two runs of the same key from sharing one header.
+        // the first row of each contiguous run. An unmapped row is a gap, not
+        // a boundary (planBuckets), so a bucket that a gap splits keeps ONE
+        // header; occurrence identities still keep two genuine runs apart.
         const keys = []
         for (let i = 0; i < domRows.length; i++) {
           const r = mapped[i]

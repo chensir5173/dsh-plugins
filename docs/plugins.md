@@ -23,7 +23,7 @@ dsh plugin --profile web add <本机仓库根>                                  
 | [`dsh-composer-history-recall`](../sub-plugins/dsh-composer-history-recall/README.md) | 输入框里 `↑`/`↓` 逐条召回**本会话你发过的**消息 | composer 键盘 | 纯客户端 | 需 `conversation.input.overlay` 槽 + composer 根 `data-composer-input`；缺席则惰性不生效 |
 | [`dsh-esc-rewind`](../sub-plugins/dsh-esc-rewind/README.md) | `Esc` 停止、`Esc Esc` 回退本轮重来、`/rewind` 从任意历史轮重来；旧会话可归档或真删 | composer 键盘 + `/rewind` + 会话头图标 | 客户端 + **宿主半**（删除模式） | 删除模式需要 `webServer`；无则自动降级为归档 |
 | [`dsh-composer-provider-label`](../sub-plugins/dsh-composer-provider-label/README.md) | 在模型名左边显示**实际打到哪个 provider**，并给出提供方/模型两级选择菜单 | composer 右侧标签（点开即菜单） | 客户端 + 可选宿主设置段 | 核心 **≥ 0.1.2-rc.1**；无 `Menu` 原语时退化为只读标签 |
-| [`dsh-session-title-regenerate`](../sub-plugins/dsh-session-title-regenerate/README.md) | 用**最低推理档**摘要本会话全部提问，重生成 ≤60 字标题 | 会话头按钮 / 侧栏行 `⋯` 菜单 / `/regenerate-title` | 客户端 + 宿主命令 | 核心 ≥ 0.1.1-rc.2 |
+| [`dsh-session-title-regenerate`](../sub-plugins/dsh-session-title-regenerate/README.md) | 用**当前模型**摘要本会话全部提问，重生成 ≤60 字标题；**思考开关 / 推理强度 / 输出上限**可在设置页调（默认关思考、512） | 会话头按钮 / 侧栏行 `⋯` 菜单 / `/regenerate-title` / 设置 →「本地插件」tab | 客户端 + 宿主命令 | 核心 ≥ 0.1.1-rc.2 |
 | [`dsh-session-time-bucket`](../sub-plugins/dsh-session-time-bucket/README.md) | 侧栏会话列表按**今天/昨天/前7天/前30天/更早**分组 | 自动：核心处于「单列表 + 最近更新」时接管观感 | 纯客户端 | 无需操作；切到按工作区/手动排序或搜索时自动退出 |
 | ~~[`dsh-open-session-workdir`](../sub-plugins/dsh-open-session-workdir/README.md)~~ **已退役** | ~~一键用**系统文件管理器**打开当前会话的工作目录~~ —— 核心已自带「Open In…」分体按钮（探测已装应用 + 记住上次选择） | 不再出现在管理器面板；源码保留在仓库 | — | 退役中：管理器扫描跳过它（`RETIRED_PLUGIN_DIRS`），无法再激活 |
 | [`dsh-hindsight-model`](../sub-plugins/dsh-hindsight-model/README.md) | 看清 **Hindsight 守护进程**当前跑的是哪个模型、改掉它，**启停它**，并按需自动拉起 —— 四层对照（落盘 / 进程实际生效 / 外层冲突源 / 生效判据） | 设置 → **Hindsight 模型** | 宿主 + 客户端 | 需 `webServer` 与 `~/.hindsight/coding-agent.json`；缺失时只禁用对应区块，其余照常 |
@@ -79,7 +79,7 @@ dsh plugin --profile web add <本机仓库根>                                  
 - **三个入口，同一套逻辑**：会话头部操作区按钮 / 侧栏会话行 `⋯` 菜单项「重新生成标题」/ 宿主命令 `/regenerate-title`。
 - **为什么菜单项对任意历史会话都有效**：走 `remote.commands.execute(sessionId, …)`，该 Remote 的 `agent` 查找会**自动恢复未打开的会话**，且**不切换你当前对话**。
 - **产出**：单行 ≤60 字、跟随消息语言的标题，直接覆盖旧标题；成功 Toast「标题已更新：…」。**副作用**：标题以 `user` 来源固定，此后新消息不会再自动更新它，要改得再点一次。
-- **配置**（写在管理器生成的 insert 项的 `config:` 上，不要另起顶层覆盖行，否则首次开关会被规范化并丢掉字段）：`provider` / `model`（必须成对）、`targetWords`、`targetCjkCharacters`、`maxInputBytes`、`maxOutputTokens`、`timeoutMs`。
+- **配置有两层**：① **设置页**（设置 →「本地插件」→ tab「重新生成标题」，`settings.localPlugins.tab`，id = entry id `session-title-regenerate`）改**思考开关 / 推理强度（`off`/`low`/`medium`/`high`/`max`）/ 输出上限**，默认 关思考 · `off` · **512**，保存即写进 profile 行 `config:` 并对后续生成生效；② profile 行 `config:` 可再写 `provider` / `model`（必须成对）、`targetWords` / `targetCjkCharacters` / `maxInputBytes` / `thinking` / `reasoningEffort` / `maxOutputTokens` / `timeoutMs`（写配置请写管理器生成的 insert 项，不要另起顶层覆盖行，否则首次开关会被规范化并丢掉字段）。思考关闭时不下发 `reasoningEffort`（等价 `off`），这是避免标题预算被思考 token 吃光的关键。
 - **可观测**：会话流里会留下一对 `command/run`/`command/done` 节点（`recordInput:false`，不记录参数）。
 
 ### dsh-session-time-bucket — 侧栏时间桶分组
@@ -87,7 +87,7 @@ dsh plugin --profile web add <本机仓库根>                                  
 - **怎么用**：**没有按钮**，全自动。核心侧栏处于「单列表 + 最近更新」时激活，在核心原生列表上注入组头与 `[工作区]` 前缀；切回「按工作区」或「手动排序」、或进入搜索，自动完整退出、零残留。
 - **能操作什么**：点组头的 chevron 折叠/展开该桶，折叠态持久化（刷新仍记住）。
 - **明确保留的核心原生行为**：状态点、悬停提示卡、行尾 `⋯` 菜单、点行打开、拖拽排序——插件一律不接管。窄栏（rail）不激活。
-- **实现约束值得知道**：它读核心的 localStorage 视图状态 `dsh.workspace.view.v5` 判定是否激活，并会按「桶序 + updatedAt」重排官方行；核心「+新会话」复用空白旧会话的特例被单独处理（始终落在「今天」且桶内最新）。
+- **实现约束值得知道**：它读核心的 localStorage 视图状态 `dsh.workspace.view.v5` 判定是否激活，并会按「桶序 + updatedAt」重排官方行；核心「+新会话」复用空白旧会话的特例被单独处理（始终落在「今天」且桶内最新）。行身份按**核心实际渲染的文案**匹配（空白行=「新会话」、无标题行=「未命名」/`Untitled`、其余=标题），读不到标题的行只当空隙、不会把同一时间桶拆成两个同名组头。
 
 ### ~~dsh-open-session-workdir — 打开会话工作目录~~（已退役 2026-09-18）
 

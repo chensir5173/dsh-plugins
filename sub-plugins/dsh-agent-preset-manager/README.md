@@ -10,7 +10,7 @@ DSH 0.2.0 起 agent preset 改由 bundle/profile 清单驱动，散落在本地�
 2. 预设是**会话级**概念，写进 profile 会让「临时试一个预设」变成「改我的 DSH 安装」。运行期声明随进程结束而消失，磁盘目录才是唯一的真源。
 3. 声明失败（重名、组合为空、宿主没有注册表）必须能被如实回报，而不是留下一个半改的 profile。
 
-**因此本插件的作用域是**：读 `$DSH_HOME` 下的预设库、校验磁盘上的组合、按需声明/撤销，并把「启用状态」记在 `$DSH_HOME/agent-preset-manager/state.json`（重启 `dsh web` 时按它自动重新声明；首次运行不启用任何东西）。
+**因此本插件的作用域是**：读 `$DSH_HOME` 下的预设库、校验磁盘上的组合、按需声明/撤销，并把「启用状态」记在 `$DSH_HOME/agent-preset-manager/state.json`（重启 `dsh web` 时按它自动重新声明——重放**等宿主注册表服务就绪**，服务比本插件晚组合就等它的注入回调；首次运行不启用任何东西）。
 
 ## 行为
 
@@ -22,7 +22,8 @@ DSH 0.2.0 起 agent preset 改由 bundle/profile 清单驱动，散落在本地�
 | 启用 | 读 `preset.yml` + `agent.cordis.yml` → **行归一化**（见下）→ 校验 → `await registry.register(...)`（0.2.x 的 `register` 是 async，等它 resolve 出撤销句柄再记账）→ 写 `state.json` 的 `enabled` 列表 → 卡片变「已启用」 |
 | 启用失败 | 目录不存在 / 组合为空 / 没有插件行 / **行里的 `!!js` 表达式求值失败**（点名表达式）/ 注册表重名（文案追加「宿主里已经有一个同名声明」）/ 状态写盘失败（**回滚刚做的声明**）都如实回报 |
 | 停用 | 用启用时拿到的句柄 `await dispose()` 撤销声明（宿主句柄同样异步，删目录路径也走同一条），并从 `state.json` 移除该 id |
-| 重启 `dsh web` | 启动时按 `state.json` 逐个重新声明（异步进行，只报告结果，不静默补写）；首次运行 `enabled` 为空；`describe()` 与 `GET /state` 的 `restorePending` 说明这轮恢复是否已经跑完 |
+| 重启 `dsh web` | 启动时按 `state.json` 逐个重新声明（异步进行，只报告结果，不静默补写）；**重放要等宿主注册表服务就绪**：注册表比本插件晚组合时，重放会等 `agentPresets` 的注入回调落地才跑，不会在启动瞬间被判成「本版本没有注册表服务」；首次运行 `enabled` 为空；`describe()` 与 `GET /state` 的 `restorePending` 说明这轮恢复是否已经跑完 |
+| 启动那轮重放没成功 | 面板**第一次读 `GET /state`**（打开 tab 或刷新）会补跑一次重放：只重试还没生效的 id（已经声明过的直接跳过，绝不重复声明），所以不必再手动「关一次再开一次」；补跑同样只报告结果，不静默补写 |
 | 新增预设 | 面板给 id / 名称 / 说明 / order；骨架取自**内置 standard 预设**的插件清单（`standard.patch.yml` 里 `preset-standard` 行的 `config.plugins`）；id 校验（1-64 位小写字母/数字/短横线/下划线，字母数字开头）、同名拒绝、读不到骨架就**整体取消**（不留半个预设） |
 | 编辑组合 | 面板直接编辑 `agent.cordis.yml` 原文，保存前依次校验：空文本、YAML 可解析、至少一行插件、行 id 不重复 |
 | 保存 | 通过校验后先写轮换备份（`<预设>/.backup/agent.cordis.yml.<时间戳>`，只保留 3 份），再原子写（临时文件 + rename） |

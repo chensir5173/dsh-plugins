@@ -1164,14 +1164,18 @@ test('pure: the scope helpers round-trip through storage and survive garbage', (
 test('picker: the menu is scoped and long lists are height-capped instead of overflowing', async () => {
   const env = pickerBoot()
   const tree = await openPicker(env)
-  assert.equal(menuProps(tree).className, 'cpl-picker', 'the card carries our scope class')
+  assert.equal(menuProps(tree).className, 'cpl-picker', 'the anchor wrapper carries our scope class')
+  assert.equal(menuProps(tree).listClassName, 'cpl-picker-list', 'the card itself carries our style hook')
   assert.equal(env.styles.length, 1, 'exactly one stylesheet is injected')
   const sheet = env.styles[0]
   assert.equal(sheet.id, 'dsh-composer-provider-label-style')
-  assert.ok(sheet.textContent.includes('.cpl-picker [role="menu"] > div:first-child'), 'selector is scoped')
-  assert.ok(sheet.textContent.includes('overflow-y: auto'), 'the list scrolls')
-  assert.match(sheet.textContent, /max-height: 224px/)
+  // Scoped to the card, not to a child of it: core renders a decorative material
+  // backdrop as the card's first child, so a `> div:first-child` rule would paint
+  // the cap onto the backdrop and leave the items area unbounded.
+  assert.ok(sheet.textContent.includes('[role="menu"].cpl-picker-list'), 'selector is scoped to the card')
+  assert.ok(!sheet.textContent.includes('first-child'), 'no rule reaches for the card first child')
   assert.match(sheet.textContent, /overflow-y: auto/)
+  assert.match(sheet.textContent, /max-height: 342px/)
   env.rerender(compProps('s1', projectionOf(SESS)))
   env.rerender(compProps('s1', projectionOf(SESS)))
   assert.equal(env.styles.length, 1, 're-rendering never injects a second sheet')
@@ -1180,9 +1184,17 @@ test('picker: the menu is scoped and long lists are height-capped instead of ove
 test('pure: the list cap fits five dense rows plus the back row', () => {
   const env = boot()
   const pure = env.window.__cpl.pure
-  const ROW = 34 // dense menu row height
-  assert.ok(pure.LIST_MAX_HEIGHT >= 5 * ROW, 'at least five model rows stay visible')
-  assert.ok(pure.LIST_MAX_HEIGHT <= 5 * ROW + ROW + 9 + 8 + 4, 'the cap stays near five rows')
+  // Row geometry of ui-primitives Menu.module.css at `dense: true`.
+  const STACKED = 46 // 20px label + 2px gap + 16px detail + 2x4px padding
+  const PLAIN = 30 // the back row, one dense line
+  const SEPARATOR = 7
+  const FOOTER = 67 // the pinned scope footer, always visible below the scroll area
+  const PADDING = 8
+  const FIVE = 5 * STACKED
+  assert.equal(pure.LIST_VISIBLE_ROWS, 5)
+  assert.ok(pure.LIST_MAX_HEIGHT >= FIVE + PLAIN + SEPARATOR, 'five model rows and the back row stay visible')
+  assert.ok(pure.LIST_MAX_HEIGHT <= FIVE + PLAIN + SEPARATOR + FOOTER + PADDING, 'and the cap leaves no room for a sixth row')
+  assert.equal(pure.LIST_CLASS, 'cpl-picker-list')
   assert.equal(pure.PICKER_CLASS, 'cpl-picker')
 })
 // --- capability audit (spec: write scope limited to model selection) --------

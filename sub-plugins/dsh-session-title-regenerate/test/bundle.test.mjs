@@ -24,7 +24,16 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { apply as hostApply, inject as hostInject, name as hostName } from '../src/index.js'
+import {
+  apply as hostApply,
+  inject as hostInject,
+  name as hostName,
+  Config as hostConfig,
+  DEFAULTS as hostDefaults,
+  clampInt as hostClampInt,
+  normalizeEntryConfig as hostNormalizeEntryConfig,
+  resolveReasoningEffort as hostResolveReasoningEffort,
+} from '../src/index.js'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const clientBundlePath = path.join(here, '..', 'src', 'client.js')
@@ -148,7 +157,7 @@ test('host: success — collects messages, lowest reasoning, commits via rename'
   assert.equal(options.model, 'deepseek-chat')
   assert.equal(options.reasoningEffort, 'off')
   assert.equal(options.purpose, 'session-title')
-  assert.equal(options.maxTokens, 100)
+  assert.equal(options.maxTokens, 512)
   assert.equal(options.sessionId, 'sess-1')
   assert.equal(typeof options.system, 'string')
   assert.ok(options.system.includes('60'))
@@ -174,6 +183,124 @@ test('host: config provider/model overrides the session route', async () => {
   assert.equal(result.kind, 'success')
   assert.equal(host.calls.streamOptions[0].provider, 'lite')
   assert.equal(host.calls.streamOptions[0].model, 'lite-model')
+})
+
+// =============================================================================
+// Host: entry config (settings tab contract)
+// =============================================================================
+
+test('host: Config projects the settings defaults (thinking off, effort off, 512 tokens)', () => {
+  assert.equal(hostConfig.type, 'object')
+  assert.equal(hostConfig.meta.volatile, true)
+
+  const json = hostConfig.toJSON()
+  const root = json.refs[String(json.uid)]
+  assert.equal(root.type, 'object')
+  assert.deepEqual(root.meta, { default: {}, volatile: true })
+  assert.deepEqual(
+    Object.keys(root.dict).sort(),
+    ['maxInputBytes', 'maxOutputTokens', 'reasoningEffort', 'targetCjkCharacters', 'targetWords', 'thinking', 'timeoutMs'].sort(),
+  )
+  const entry = (name) => json.refs[String(root.dict[name])]
+  assert.equal(entry('thinking').type, 'boolean')
+  assert.equal(entry('thinking').meta.default, false)
+  assert.equal(entry('reasoningEffort').type, 'string')
+  assert.equal(entry('reasoningEffort').meta.default, 'off')
+  assert.equal(entry('maxOutputTokens').meta.default, 512)
+  assert.equal(entry('maxInputBytes').meta.default, 12288)
+  assert.equal(entry('timeoutMs').meta.default, 30000)
+  assert.equal(json.refs[String(json.uid)].type, 'object')
+
+  const standard = hostConfig['~standard']
+  assert.equal(standard.version, 1)
+  // vendor 故意不写 'schemastery'：配置写入要走普通 entry restart
+  assert.equal(standard.vendor, 'dsh-session-title-regenerate')
+
+  const validated = standard.validate({ thinking: true, reasoningEffort: 'max', maxOutputTokens: 99999, provider: 'lite' })
+  assert.equal(validated.value.thinking, true)
+  assert.equal(validated.value.reasoningEffort, 'max')
+  assert.equal(validated.value.maxOutputTokens, 8192)
+  assert.ok(!('issues' in validated))
+  // 未声明的 provider/model 原样保留（仍由 Loader 行配置提供）
+  assert.equal(validated.value.provider, 'lite')
+
+  const fallback = standard.validate(undefined).value
+  assert.equal(fallback.thinking, false)
+  assert.equal(fallback.reasoningEffort, 'off')
+  assert.equal(fallback.maxOutputTokens, 512)
+  assert.equal(fallback.maxInputBytes, 12288)
+
+  // toJSON 返回深拷贝，调用方改不坏内部表
+  const copy = hostConfig.toJSON()
+  copy.refs['11'].meta.default = 1
+  assert.equal(hostConfig.toJSON().refs['11'].meta.default, 512)
+})
+
+test('host: the thinking switch decides the reasoning effort and the budget is clamped', () => {
+  assert.equal(hostDefaults.thinking, false)
+  assert.equal(hostDefaults.reasoningEffort, 'off')
+  assert.equal(hostDefaults.maxOutputTokens, 512)
+
+  assert.equal(hostResolveReasoningEffort(undefined), 'off')
+  assert.equal(hostResolveReasoningEffort({ thinking: false, reasoningEffort: 'max' }), 'off')
+  assert.equal(hostResolveReasoningEffort({ thinking: true, reasoningEffort: 'high' }), 'high')
+  assert.equal(hostResolveReasoningEffort({ thinking: true, reasoningEffort: 'max' }), 'max')
+  // 大小写/类型不合法 -> 回落默认档位（而不是把脏值透传给提供方）
+  assert.equal(hostResolveReasoningEffort({ thinking: true, reasoningEffort: 'HIGH' }), 'off')
+  assert.equal(hostResolveReasoningEffort({ thinking: true, reasoningEffort: 7 }), 'off')
+
+  const low = hostNormalizeEntryConfig({ maxOutputTokens: 5, targetWords: 0, targetCjkCharacters: 'x', maxInputBytes: 1, timeoutMs: 10 })
+  assert.equal(low.maxOutputTokens, 16)
+  assert.equal(low.targetWords, 1)
+  assert.equal(low.targetCjkCharacters, 60)
+  assert.equal(low.maxInputBytes, 256)
+  assert.equal(low.timeoutMs, 1000)
+
+  const high = hostNormalizeEntryConfig({
+    maxOutputTokens: 99999,
+    targetWords: 9999,
+    maxInputBytes: 99 * 1024 * 1024,
+    thinking: 'yes',
+    reasoningEffort: 'max',
+    provider: 'lite',
+    model: 'lite-model',
+  })
+  assert.equal(high.maxOutputTokens, 8192)
+  assert.equal(high.targetWords, 400)
+  assert.equal(high.maxInputBytes, 4 * 1024 * 1024)
+  // 只有严格 true 才算打开思考
+  assert.equal(high.thinking, false)
+  assert.equal(hostNormalizeEntryConfig({ thinking: true }).thinking, true)
+  // 开了思考但没给档位 -> 默认档位
+  assert.equal(hostNormalizeEntryConfig({ thinking: true }).reasoningEffort, 'off')
+
+  assert.equal(hostClampInt('12.9', 16, 8192, 512), 16)
+  assert.equal(hostClampInt(4096, 16, 8192, 512), 4096)
+  assert.equal(hostClampInt('nope', 16, 8192, 512), 512)
+})
+
+test('host: entry config drives reasoningEffort and maxTokens on the llm call', async () => {
+  const agent = makeAgent({ events: [userEvent(1, '帮我把标题改短一点')] })
+
+  const on = makeHost({ streamImpl: () => textStream('帮我把标题改短一点') })
+  hostApply(on.ctx, { thinking: true, reasoningEffort: 'high', maxOutputTokens: 2048 })
+  const onResult = await on.calls.registered[0].handler({ agent, signal: signal() })
+  assert.equal(onResult.kind, 'success')
+  assert.equal(on.calls.streamOptions[0].reasoningEffort, 'high')
+  assert.equal(on.calls.streamOptions[0].maxTokens, 2048)
+
+  const off = makeHost({ streamImpl: () => textStream('帮我把标题改短一点') })
+  hostApply(off.ctx, { thinking: false, reasoningEffort: 'max' })
+  await off.calls.registered[0].handler({ agent, signal: signal() })
+  assert.equal(off.calls.streamOptions[0].reasoningEffort, 'off')
+  assert.equal(off.calls.streamOptions[0].maxTokens, 512)
+
+  // 行配置缺失时退回默认：reasoningEffort 'off' + 512
+  const bare = makeHost({ streamImpl: () => textStream('帮我把标题改短一点') })
+  hostApply(bare.ctx, undefined)
+  await bare.calls.registered[0].handler({ agent, signal: signal() })
+  assert.equal(bare.calls.streamOptions[0].reasoningEffort, 'off')
+  assert.equal(bare.calls.streamOptions[0].maxTokens, 512)
 })
 
 // =============================================================================
@@ -514,22 +641,25 @@ new Function('window', 'navigator', 'document', clientSource)(
  */
 function makeRemoteRoot() {
   const root = {}
-  Object.defineProperty(root, 'commands', {
-    configurable: true,
-    enumerable: true,
-    get() {
-      throw new Error('cannot get property "remote.commands" without inject')
-    },
-  })
+  for (const name of ['commands', 'settings']) {
+    Object.defineProperty(root, name, {
+      configurable: true,
+      enumerable: true,
+      get() {
+        throw new Error(`cannot get property "remote.${name}" without inject`)
+      },
+    })
+  }
   return root
 }
 
 /** Fake client ctx: services resolved through get(), slots captured. */
-function makeClientCtx({ remoteCommands, sessions, locale }) {
+function makeClientCtx({ remoteCommands, sessions, locale, settings }) {
   const registered = []
   const services = {
     remote: makeRemoteRoot(),
     'remote.commands': remoteCommands,
+    'remote.settings': settings,
     sessions,
     locale,
   }
@@ -552,7 +682,7 @@ function makeClientCtx({ remoteCommands, sessions, locale }) {
   }
 }
 
-function bootClient({ remoteCommands, sessions, locale }) {
+function bootClient({ remoteCommands, sessions, locale, settings }) {
   const factory = factories.get(PKG_ID)
   assert.ok(factory, `client bundle did not register id "${PKG_ID}"`)
   // Module-level service handles persist across boots in the same bundle
@@ -567,7 +697,7 @@ function bootClient({ remoteCommands, sessions, locale }) {
   viewport.setAttribute('role', 'presentation')
   menu.appendChild(viewport)
   globalThis.document.viewport = viewport
-  const ctx = makeClientCtx({ remoteCommands, sessions, locale })
+  const ctx = makeClientCtx({ remoteCommands, sessions, locale, settings })
   const exports = factory(requireStub)
   exports.apply(ctx)
   return { ctx, hooks: globalThis.window.__sessionTitleRegenTest }
@@ -622,6 +752,135 @@ test('client: registers header button and feedback overlay slots', () => {
   assert.equal(typeof header.component, 'function')
   const overlay = ctx.registered.find((r) => r.options.name === 'shell.overlay')
   assert.equal(overlay.options.id, 'session-title-regen-feedback')
+})
+
+// =============================================================================
+// Client: settings tab
+// =============================================================================
+
+test('client: contributes a local-plugins settings tab for the entry namespace', () => {
+  const { ctx } = bootClient({ remoteCommands: undefined, sessions: {}, locale: undefined })
+  const tab = ctx.registered.find((r) => r.options.name === 'settings.localPlugins.tab')
+  assert.ok(tab, 'settings tab was not registered')
+  assert.equal(tab.options.id, 'session-title-regenerate')
+  assert.equal(tab.options.order, 45)
+  assert.equal(typeof tab.component, 'function')
+  assert.ok(/标题|title/i.test(String(tab.options.label())))
+})
+
+test('client: settings helpers normalize the describe() row and clamp writes', async () => {
+  const { hooks } = bootClient({ remoteCommands: undefined, sessions: {}, locale: undefined })
+  assert.equal(hooks.SETTINGS_NS, 'session-title-regenerate')
+  assert.deepEqual(hooks.EFFORT_OPTIONS, ['off', 'low', 'medium', 'high', 'max'])
+  assert.deepEqual(hooks.SETTINGS_DEFAULTS, { thinking: false, reasoningEffort: 'off', maxOutputTokens: 512 })
+
+  assert.deepEqual(hooks.settingsFromRow(undefined), { thinking: false, reasoningEffort: 'off', maxOutputTokens: 512 })
+  assert.deepEqual(
+    hooks.settingsFromRow({ value: { thinking: true, reasoningEffort: 'high', maxOutputTokens: 2048 } }),
+    { thinking: true, reasoningEffort: 'high', maxOutputTokens: 2048 },
+  )
+  assert.equal(hooks.settingsFromRow({ value: { reasoningEffort: 'HIGH' } }).reasoningEffort, 'off')
+  assert.equal(hooks.settingsFromRow({ value: { reasoningEffort: 7 } }).reasoningEffort, 'off')
+  assert.equal(hooks.settingsFromRow({ value: { maxOutputTokens: 1 } }).maxOutputTokens, 16)
+  assert.equal(hooks.settingsFromRow({ value: { maxOutputTokens: 99999 } }).maxOutputTokens, 8192)
+  assert.equal(hooks.settingsFromRow({ value: { maxOutputTokens: 'nope' } }).maxOutputTokens, 512)
+  assert.equal(hooks.settingsFromRow({ value: { thinking: 'yes' } }).thinking, false)
+
+  // 档位单选表：不带 off（off 由思考开关表达）；非法/空值一律落到 low。
+  assert.deepEqual(hooks.ACTIVE_EFFORT_OPTIONS, ['low', 'medium', 'high', 'max'])
+  assert.equal(hooks.activeEffortOf('off'), 'low')
+  assert.equal(hooks.activeEffortOf(''), 'low')
+  assert.equal(hooks.activeEffortOf('nope'), 'low')
+  assert.equal(hooks.activeEffortOf('high'), 'high')
+
+  // 未保存判定：数字项按夹取后的整数比较，开关/档位严格比较。
+  const clean = { thinking: false, reasoningEffort: 'off', maxOutputTokens: 512 }
+  assert.equal(hooks.sameSettings(clean, { thinking: false, reasoningEffort: 'off', maxOutputTokens: '512' }), true)
+  assert.equal(hooks.sameSettings(clean, { thinking: true, reasoningEffort: 'off', maxOutputTokens: 512 }), false)
+  assert.equal(hooks.sameSettings(clean, { thinking: false, reasoningEffort: 'low', maxOutputTokens: 512 }), false)
+  assert.equal(hooks.sameSettings(clean, null), false)
+  assert.equal(hooks.sameSettings({ ...clean, maxOutputTokens: '' }, { ...clean, maxOutputTokens: 16 }), true)
+
+  // 本次调用回显：思考关不下发档位；思考开时 off/非法被抬到 low；数字先夹取。
+  assert.match(hooks.effectiveSummary({ thinking: false, reasoningEffort: 'off', maxOutputTokens: 512 }), /(不下发 reasoningEffort|no reasoningEffort)/)
+  assert.ok(hooks.effectiveSummary({ thinking: false, maxOutputTokens: 512 }).includes('512'))
+  assert.ok(hooks.effectiveSummary({ thinking: true, reasoningEffort: 'off', maxOutputTokens: 700 }).includes('reasoningEffort = low'))
+  assert.ok(hooks.effectiveSummary({ thinking: true, reasoningEffort: 'max', maxOutputTokens: 99999 }).includes('maxTokens 8192'))
+
+  const seen = []
+  const settings = {
+    describe: async () => ({
+      ok: true,
+      value: {
+        namespaces: [
+          { ns: 'dsh-other-plugin', value: { thinking: true, maxOutputTokens: 64 } },
+          { ns: 'session-title-regenerate', value: { thinking: true, reasoningEffort: 'medium', maxOutputTokens: 900 } },
+        ],
+      },
+    }),
+    update: async (ns, payload) => {
+      seen.push({ ns, payload })
+      return { ok: true, value: { revision: 2 } }
+    },
+  }
+
+  const read = await hooks.readSettings(settings)
+  assert.equal(read.row.ns, 'session-title-regenerate')
+  assert.deepEqual(read.settings, { thinking: true, reasoningEffort: 'medium', maxOutputTokens: 900 })
+
+  const written = await hooks.saveSettings(settings, { thinking: true, reasoningEffort: 'max', maxOutputTokens: 99999 })
+  assert.deepEqual(written, { thinking: true, reasoningEffort: 'max', maxOutputTokens: 8192 })
+  assert.equal(seen.length, 1)
+  assert.equal(seen[0].ns, 'session-title-regenerate')
+  assert.deepEqual(seen[0].payload, { thinking: true, reasoningEffort: 'max', maxOutputTokens: 8192 })
+
+  await assert.rejects(() => hooks.readSettings(null), /settings-unavailable/)
+  await assert.rejects(() => hooks.readSettings({}), /settings-unavailable/)
+  await assert.rejects(() => hooks.saveSettings({}, {}), /settings-unavailable/)
+  await assert.rejects(
+    () => hooks.readSettings({ describe: async () => ({ ok: false, error: { code: 'SettingsUnavailable', message: 'no settings service' } }) }),
+    /no settings service/,
+  )
+
+  // 组件本身可渲染（React stub 下 useEffect 不跑，draft 为空 -> 展示默认值）
+  const tree = hooks.SettingsSection()
+  assert.equal(tree.__element, true)
+
+  // 思考关（默认）这一支：档位下拉已删掉、不渲染单选，只给「不思考」说明 + 本次调用回显。
+  const tags = []
+  const texts = []
+  const walk = (node) => {
+    if (node === null || node === undefined) return
+    if (typeof node === 'string' || typeof node === 'number') { texts.push(String(node)); return }
+    if (Array.isArray(node)) { node.forEach(walk); return }
+    if (typeof node !== 'object') return
+    if (node.__element === true) { tags.push(node.type); walk(node.props && node.props.children); return }
+    Object.keys(node).forEach((key) => walk(node[key]))
+  }
+  walk(tree)
+  assert.equal(tags.includes('select'), false, 'the effort dropdown must be gone')
+  assert.equal(tags.includes('radio'), false, 'no effort radios while thinking is off')
+  assert.ok(texts.some((s) => /(不下发 reasoningEffort|no reasoningEffort)/.test(s)), 'the not-thinking note is missing')
+  assert.ok(texts.some((s) => /(本次调用|This call)/.test(s)), 'the effective-call summary is missing')
+})
+
+test('client: the settings controller is resolved via get(), never the throwing bare accessor', () => {
+  const { hooks } = bootClient({ remoteCommands: undefined, sessions: {}, locale: undefined })
+  const settings = { describe: async () => ({ ok: true, value: { namespaces: [] } }) }
+  const scope = { get: (n) => (n === 'remote.settings' ? settings : undefined) }
+  assert.equal(hooks.readRemoteSettings(scope), settings)
+
+  const throwing = {}
+  Object.defineProperty(throwing, 'remote.settings', {
+    configurable: true,
+    get() { throw new Error('cannot get property "remote.settings" without inject') },
+  })
+  Object.defineProperty(throwing, 'settings', {
+    configurable: true,
+    get() { throw new Error('cannot get property "settings" without inject') },
+  })
+  assert.equal(hooks.readRemoteSettings(throwing), null)
+  assert.equal(hooks.readRemoteSettings(null), null)
 })
 
 // =============================================================================

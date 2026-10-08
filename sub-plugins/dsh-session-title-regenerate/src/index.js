@@ -3,10 +3,12 @@
 // Registers one slash command `regenerate-title` on the host. The handler:
 //   1. collects every eligible user (human) text message from the session log
 //      (the whole conversation, truncated by a UTF-8 byte budget),
-//   2. calls `ctx.llm.stream` at the LOWEST reasoning tier —
+//   2. calls `ctx.llm.stream` at the LOWEST reasoning tier by default —
 //      `reasoningEffort: 'off'` plus `purpose: 'session-title'`, which the
 //      DeepSeek adapter additionally forces to `thinking: disabled` — with a
-//      tiny maxTokens budget and a strict one-line prompt,
+//      strict one-line prompt. The tier and the maxTokens budget are editable
+//      in the plugin's settings tab (thinking switch / reasoning effort /
+//      max output tokens),
 //   3. normalizes the model output (one line, no quotes/control codes, capped
 //      at 60 code points) and commits it through `ctx.sessionTitle.rename()`
 //      — the same public API `remote.session.rename` uses, so the new title
@@ -40,10 +42,14 @@ const inject = ['commands', 'llm', 'sessionTitle']
 // --- defaults & config --------------------------------------------------------
 
 /**
- * 插件默认策略（可被 Loader 行配置覆盖）。
+ * 插件默认策略（可被 Loader 行配置 / 设置页覆盖）。
  * - targetWords / targetCjkCharacters：提示词里的标题长度目标。
  * - maxInputBytes：拼接后的全部用户提问的最大 UTF-8 字节数，超出的消息直接丢弃。
- * - maxOutputTokens：标题输出上限，保持调用极短、极便宜。
+ * - thinking：思考开关；false（默认）= 强制关闭思考，true = 用下面的推理强度。
+ * - reasoningEffort：推理强度档位（off/low/medium/high/max），仅在 thinking 为 true
+ *   时生效；'off' 与 thinking:false 等价。
+ * - maxOutputTokens：标题输出上限。默认 512 给思考留出余量：旧的 100 会被上游
+ *   finish_reason=length 截断（报错 title output reached maxTokens）。
  * - timeoutMs：单次生成的超时。
  * - provider / model：可选路由覆盖；缺省使用会话自身请求头里的路由。
  */
@@ -51,10 +57,67 @@ const DEFAULTS = {
   targetWords: 40,
   targetCjkCharacters: 60,
   maxInputBytes: 12 * 1024,
-  maxOutputTokens: 100,
+  thinking: false,
+  reasoningEffort: 'off',
+  maxOutputTokens: 512,
   timeoutMs: 30000,
   provider: undefined,
   model: undefined,
+}
+
+/** 推理强度可选档位（client 端下拉镜像同一张表）。 */
+const REASONING_EFFORTS = ['off', 'low', 'medium', 'high', 'max']
+
+/** maxOutputTokens 的合法区间（设置页输入框与配置归一化共用）。 */
+const MAX_OUTPUT_TOKENS_MIN = 16
+const MAX_OUTPUT_TOKENS_MAX = 8192
+
+/** 把任意输入夹成区间内的整数；非数字回落到 fallback。 */
+function clampInt(value, min, max, fallback) {
+  const n = typeof value === 'number' ? value : Number(value)
+  if (!Number.isFinite(n)) return fallback
+  const i = Math.trunc(n)
+  if (i < min) return min
+  if (i > max) return max
+  return i
+}
+
+/** 归一化推理强度：不在档位表内的一律回落默认 'off'。 */
+function normalizeReasoningEffort(value) {
+  return typeof value === 'string' && REASONING_EFFORTS.indexOf(value) >= 0 ? value : DEFAULTS.reasoningEffort
+}
+
+/**
+ * 解析本次调用真正使用的推理强度：思考关掉时一律 'off'（最省 token），
+ * 开启时用配置里的档位；档位不被模型支持时 streamTitle 会退一次「不传该参数」。
+ * - 参数类型：config -- 归一化后的插件配置。
+ * - 返回值：string -- 'off' | 'low' | 'medium' | 'high' | 'max'。
+ * - 调用样例：const effort = resolveReasoningEffort(config)
+ */
+function resolveReasoningEffort(config) {
+  const source = config && typeof config === 'object' ? config : {}
+  if (source.thinking !== true) return 'off'
+  return normalizeReasoningEffort(source.reasoningEffort)
+}
+
+/**
+ * 归一化 Loader 行 / 设置页传入的配置：补默认值、夹住越界值、丢掉非法类型。
+ * provider/model 等未声明的键原样保留（仍走 Loader 行配置）。
+ * - 参数类型：input -- unknown。
+ * - 返回值：object -- 归一键值对象。
+ * - 调用样例：const resolved = normalizeEntryConfig({ maxOutputTokens: 4096 })
+ */
+function normalizeEntryConfig(input) {
+  const source = input && typeof input === 'object' && !Array.isArray(input) ? input : {}
+  return Object.assign({}, source, {
+    targetWords: clampInt(source.targetWords, 1, 400, DEFAULTS.targetWords),
+    targetCjkCharacters: clampInt(source.targetCjkCharacters, 1, 400, DEFAULTS.targetCjkCharacters),
+    maxInputBytes: clampInt(source.maxInputBytes, 256, 4 * 1024 * 1024, DEFAULTS.maxInputBytes),
+    thinking: source.thinking === true,
+    reasoningEffort: normalizeReasoningEffort(source.reasoningEffort),
+    maxOutputTokens: clampInt(source.maxOutputTokens, MAX_OUTPUT_TOKENS_MIN, MAX_OUTPUT_TOKENS_MAX, DEFAULTS.maxOutputTokens),
+    timeoutMs: clampInt(source.timeoutMs, 1000, 600000, DEFAULTS.timeoutMs),
+  })
 }
 
 /**
@@ -363,7 +426,7 @@ function makeHandler(ctx, config) {
         const raw = await streamTitle(ctx, {
           provider: route.provider,
           model: route.model,
-          reasoningEffort: 'off',
+          reasoningEffort: resolveReasoningEffort(config),
           messages: [createUserMessage({ content: [{ type: 'text', text: frameMessages(messages) }] })],
           system: systemPrompt(config),
           maxTokens: config.maxOutputTokens,
@@ -395,13 +458,58 @@ function makeHandler(ctx, config) {
  * - 调用样例：由 cordis Loader 按 apply/inject/name 约定调用。
  */
 function apply(ctx, config) {
-  const resolved = { ...DEFAULTS, ...(config && typeof config === 'object' ? config : {}) }
+  const resolved = normalizeEntryConfig({ ...DEFAULTS, ...(config && typeof config === 'object' ? config : {}) })
   return ctx.commands.register({
     name: 'regenerate-title',
-    description: '用当前模型以最低推理模式总结全部用户提问，重新生成会话标题',
+    description: '用当前模型总结全部用户提问并重写会话标题（思考开关/推理强度/输出上限见 设置 → 本地插件 → 重新生成标题）',
     recordInput: false,
     handler: makeHandler(ctx, resolved),
   })
 }
 
-export { apply, inject, name }
+// --- 0.2.0 entry config（设置页命名空间）--------------------------------------
+
+/**
+ * 0.2.0 把「插件行配置」做成了设置分页：settings 服务读每个插件 entry 导出的
+ * Config（`entry.fiber.runtime.Config`），投影在 ENTRY ID（本插件 =
+ * `session-title-regenerate`）下，向别的 ns 写入直接抛
+ * `No configurable plugin entry "<ns>"`。`link:` 形态的宿主半无法 import
+ * `@deepseek-ai/schemastery`（ERR_MODULE_NOT_FOUND），所以这里手写 schema，
+ * 需要满足三个消费者：
+ *   - cordis `resolveConfig` → `Config[~standard].validate(raw)`；
+ *   - settings 服务 → `meta.volatile`（volatileForm）+ `toJSON()`：它用
+ *     `new z(schema.toJSON())` 重建真 schemastery（dsh-settings 的
+ *     lib/types/schema.js plainSchema），所以这张 refs 表必须与真实输出同形；
+ *   - loader diff → `~standard.vendor`：故意不写 'schemastery'，好让配置写入走
+ *     普通 entry restart（apply(ctx, config) 拿到新值），而不是我们表达不了的
+ *     in-place volatile commit。
+ * 下表由等价的 schemastery schema（`z.object({...}).volatile().toJSON()`）离线
+ * 生成，并用 `new z(json)` 回灌验证过。
+ */
+const CONFIG_SCHEMA_JSON = Object.freeze({"uid":15,"refs":{"1":{"type":"number","meta":{"default":40}},"3":{"type":"number","meta":{"default":60}},"5":{"type":"number","meta":{"default":12288}},"7":{"type":"boolean","meta":{"default":false}},"9":{"type":"string","meta":{"default":"off"}},"11":{"type":"number","meta":{"default":512}},"13":{"type":"number","meta":{"default":30000}},"15":{"type":"object","meta":{"default":{},"volatile":true},"dict":{"targetWords":1,"targetCjkCharacters":3,"maxInputBytes":5,"thinking":7,"reasoningEffort":9,"maxOutputTokens":11,"timeoutMs":13}}}})
+
+/** 导出给 Loader / 设置服务的 Config schema（见上方说明）。 */
+function entryConfigSchema() {
+  const schema = (input) => normalizeEntryConfig(input)
+  schema.meta = { volatile: true }
+  schema.type = 'object'
+  schema.toJSON = () => JSON.parse(JSON.stringify(CONFIG_SCHEMA_JSON))
+  schema['~standard'] = {
+    version: 1,
+    vendor: 'dsh-session-title-regenerate',
+    validate(value) {
+      try { return { value: normalizeEntryConfig(value) } }
+      catch (error) { return { issues: [{ message: error && error.message ? error.message : String(error) }] } }
+    },
+  }
+  return schema
+}
+
+/** 0.2.0 行配置 schema（测试断言其形状与 vendor）。 */
+export const Config = entryConfigSchema()
+
+export {
+  apply, inject, name, DEFAULTS, REASONING_EFFORTS,
+  MAX_OUTPUT_TOKENS_MIN, MAX_OUTPUT_TOKENS_MAX,
+  clampInt, normalizeReasoningEffort, normalizeEntryConfig, resolveReasoningEffort,
+}

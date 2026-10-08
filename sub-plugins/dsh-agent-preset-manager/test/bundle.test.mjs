@@ -1143,3 +1143,164 @@ test('row health is synchronous, resolution-only, and honest about a null answer
   assert.equal(none[0].level, 'unavailable')
   assert.match(none[0].reason, /没有可用的模块解析器/)
 })
+
+// --- boot: the replay waits for the registry ---------------------------------
+//
+// A restart used to lose every declaration: mount() ran the replay on the same
+// tick as the registry probe, read "no agentPresets service here yet" as "this
+// DSH line has no registry", refused every remembered id, and wrote that refusal
+// into the report. The registry then arrived, nothing replayed, and state.json
+// kept the panel switches on while no session could select a preset.
+
+/** Point makeDeps at this test's throwaway home for the length of the test. */
+function useHome(t, home) {
+  const previous = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  t.after(() => {
+    if (previous === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previous
+  })
+}
+
+/** The host's contract once more: register() is async and resolves a disposer. */
+function asyncRegistry() {
+  const registry = {
+    declared: [],
+    async register(definition) {
+      registry.declared.push(definition)
+      await Promise.resolve()
+      return async () => {
+        const index = registry.declared.findIndex((row) => row.id === definition.id)
+        if (index >= 0) registry.declared.splice(index, 1)
+      }
+    },
+  }
+  return registry
+}
+
+/** Write the ledger alone: what the panel believes is enabled. */
+function writeLedger(world, ids) {
+  fs.mkdirSync(path.join(world.home, 'agent-preset-manager'), { recursive: true })
+  fs.writeFileSync(
+    stateFileOf(world),
+    JSON.stringify({ version: 1, enabled: ids, updatedAt: '2026-10-08T00:00:00.000Z' }),
+    'utf8',
+  )
+}
+
+/**
+ * The ctx the boot path sees. Services stay empty unless the test fills them in,
+ * which is how a composition that composes the registry AFTER this plugin looks:
+ * get() answers nothing and inject() is the only way in.
+ */
+function makeBootContext({ injectSurface = true, services = {} } = {}) {
+  const injected = []
+  const registered = []
+  const ctx = {
+    baseUrl: null,
+    services,
+    effect(factory) { return typeof factory === 'function' ? factory() : undefined },
+    get(key) {
+      if (key === 'webServer') {
+        return {
+          register(route) {
+            registered.push(route)
+            return () => {}
+          },
+        }
+      }
+      return ctx.services[key]
+    },
+  }
+  if (injectSurface) ctx.inject = (names, callback) => injected.push({ names, callback })
+  return { ctx, injected, registered }
+}
+
+async function waitFor(predicate, timeoutMs = 2000) {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    if (predicate()) return true
+    if (Date.now() > deadline) return false
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  }
+}
+
+test('boot: a registry that arrives late is awaited, then the ledger is replayed', async (t) => {
+  const world = makeWorld(t)
+  writePreset(world, 'mine', { metadata: SAMPLE_METADATA, composition: compositionText(SAMPLE_ROWS) })
+  writeLedger(world, ['mine'])
+  useHome(t, world.home)
+
+  const { ctx, injected } = makeBootContext()
+  const handle = apply(ctx)
+  await new Promise((resolve) => setTimeout(resolve, 30))
+
+  assert.equal(handle.describe().restore, null, 'nothing is replayed before a registry exists')
+  assert.equal(handle.describe().restorePending, true, 'the pass stays pending, not failed')
+  assert.deepEqual(handle.describe().errors, [])
+
+  const registry = asyncRegistry()
+  const injection = injected.find((row) => row.names.includes('agentPresets'))
+  assert.ok(injection, 'the host half asks to be injected with the registry')
+  injection.callback({ agentPresets: registry })
+
+  assert.equal(await waitFor(() => handle.describe().restorePending === false), true, 'the replay settles when the registry does arrive')
+  const report = handle.describe().restore
+  assert.deepEqual(report.restored, ['mine'])
+  assert.deepEqual(report.failed, [])
+  assert.deepEqual(registry.declared.map((row) => row.id), ['mine'])
+  assert.equal(handle.describe().runtimeSupported, true)
+  assert.deepEqual(handle.describe().handles, ['mine'])
+})
+
+test('boot: without an injection surface the pass settles instead of hanging', async (t) => {
+  const world = makeWorld(t)
+  writePreset(world, 'mine', { metadata: SAMPLE_METADATA, composition: compositionText(SAMPLE_ROWS) })
+  writeLedger(world, ['mine'])
+  useHome(t, world.home)
+
+  const { ctx, injected } = makeBootContext({ injectSurface: false })
+  const handle = apply(ctx)
+  assert.deepEqual(injected, [], 'nothing is asked for when the composition has no injection surface')
+  assert.equal(await waitFor(() => handle.describe().restorePending === false), true)
+
+  const report = handle.describe().restore
+  assert.equal(report.attempted, 1)
+  assert.deepEqual(report.restored, [])
+  assert.match(report.failed[0].error, /没有 agent preset 注册表服务/)
+})
+
+test('boot: the first panel read repairs a pass that could not complete', async (t) => {
+  const world = makeWorld(t)
+  writeLedger(world, ['mine'])
+  useHome(t, world.home)
+
+  const registry = asyncRegistry()
+  const { ctx, registered } = makeBootContext({ services: { agentPresets: registry } })
+  const handle = apply(ctx)
+  assert.equal(await waitFor(() => handle.describe().restorePending === false), true)
+  assert.deepEqual(handle.describe().restore.restored, [])
+  assert.equal(handle.describe().restore.failed.length, 1, 'the remembered id has no directory yet')
+
+  // The directory appears (a preset was imported, a disk finished mounting…):
+  // the next /state read is the healing checkpoint.
+  writePreset(world, 'mine', { metadata: SAMPLE_METADATA, composition: compositionText(SAMPLE_ROWS) })
+  const handlers = {}
+  for (const route of registered) handlers[route.path] = route.handler
+
+  // /state carries the report under restore.restored, exactly like /bootstrap.
+  const first = await callHandler(handlers, API_PREFIX + '/state', 'GET')
+  assert.equal(first.status, 200)
+  assert.deepEqual(first.json.restore.restored.restored, [], 'this answer still carries the failed report…')
+  assert.equal(first.json.restore.restoredPending, true, '…and the read itself started the retry')
+  assert.equal(await waitFor(() => handle.describe().restorePending === false), true)
+
+  const second = await callHandler(handlers, API_PREFIX + '/state', 'GET')
+  assert.deepEqual(second.json.restore.restored.restored, ['mine'])
+  assert.deepEqual(second.json.restore.restored.failed, [])
+  assert.equal(second.json.runtime.declared.includes('mine'), true)
+
+  const third = await callHandler(handlers, API_PREFIX + '/state', 'GET')
+  assert.deepEqual(third.json.restore.restored.restored, ['mine'], 'a settled pass is not repeated by every poll')
+  assert.equal(registry.declared.length, 1, 'and no id is ever declared twice')
+})

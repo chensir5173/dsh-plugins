@@ -11,7 +11,7 @@ DSH 0.2.0 线把 agent preset 改成 **bundle 形态加载**，用户自己的�
 - **不要改写 profile 的 `cordis.patch.yml` 来加载 preset**：该文件由 `dsh-plugin-manager` 独占维护，且每次写入都会触发核心整树事务性重应用、独占宿主事件循环 0.7–1.2 s（见 [2026-09-10-toggle-write-batching.md](2026-09-10-toggle-write-batching.md)）。运行期声明既不打这个代价，也天然是「本会话/本进程有效」的语义。
 - **注册表服务的取法与降级**：宿主半依次 `ctx.get('agentPresets')`、`ctx.get('agentPresetsRoot')`（取 `.agentPresets` 或对象本身），失败时回退 `ctx.inject(['agentPresets'], cb)`；拿到 `register({ id, name, description?, order?, plugins })` 后每次启用都调用它并把**返回的 dispose 句柄**存进 probe；服务缺席就是「只读降级」——面板能查看与编辑，启用/停用明确不可用并给出原因，绝不静默。
 - **声明必须有回滚**：启用 = 读元数据 + 读组合 → `register(...)` → 写 `state.json`；任何一步失败都要撤掉这次 `register`（否则宿主里留下半个声明）。写 `state.json` 失败时同样要撤声明再报错（本插件实测断言 `declared.length === 0`）。
-- **状态是账本不是事实**：`state.json` 只记「用户想要启用哪些 id」；进程重启后声明全部消失，宿主半启动时按账本重放（`restoreEnabled`）并且**只报告不写回**——重放失败要让用户看见，不能偷偷改账本。
+- **状态是账本不是事实**：`state.json` 只记「用户想要启用哪些 id」；进程重启后声明全部消失，宿主半启动时按账本重放（`restoreEnabled`）并且**只报告不写回**——重放失败要让用户看见，不能偷偷改账本。**重放必须等注册表就绪**（见篇末 2026-10-08 一节）：服务还没组合完就重放，会被自己的守卫判成「本版本没有注册表服务」而全数失败，账本却仍写着 enabled ⇒ 面板显示「已开启」、会话里却选不到。
 - **库目录约定**（面板与迁移都按它工作）：新库 `$DSH_HOME/agent-presets/<id>/`，旧库 `$DSH_HOME/.agent-presets/<id>/`，**旧库优先**（同名时新库那行标注 shadowed）；每个预设两个文件：`preset.yml`（元数据）+ `agent.cordis.yml`（组合行）；状态 `$DSH_HOME/agent-preset-manager/state.json`；组合备份 `<预设>/.backup/` 保留 3 份。
 - **写组合的纪律**：先 `backupFile(file, 3)` 再 `writeTextAtomic`（tmp + rename）；文本为空、YAML 解析失败、行 id 重复一律**拒绝保存且一个字节都不写**（单测实测：坏 YAML 时原文件 sha 不变）。
 - **体检要分两层**：元数据坏 ≠ 状态坏——只有「组合坏」才把状态标成 `invalid`，元数据坏时状态仍是 `disabled`（本插件实测口径）。行体检三级 `ok / suspect / unavailable`，其中 `unavailable` 优先展示（有 unavailable 时 problems 里不再列 suspect 行）。
@@ -44,3 +44,26 @@ node --test <dsh-plugin-manager/test/*.test.mjs>                        # 7 pass
 ```
 
 文档与自检：`sub-plugins/dsh-agent-preset-manager/README.md`、`ACCEPTANCE.md`。
+
+## 2026-10-08：重启后 preset 消失、面板却显示「已开启」（重放跑在注册表就绪之前）
+
+**症状**（desktop 0.2.0-rc.2 真机）：重启后会话里选不到任何本地 preset，设置 →「Agent 预设」里三个开关都是开着的；`GET /__dsh-agent-presets/state` 是 `runtime={"supported":true,"declared":[]}`、每张卡片 `status:"failed"` + 「没有生效的声明（…重新开关一次即可）」、`restore.restored = { attempted: 3, restored: [], failed: [三条「当前 DSH 版本没有 agent preset 注册表服务…」] }`。
+
+**根因链**（三环）：
+1. 组合顺序不保证 `agentPresets` 服务先就位：`mounted()` 里同步 `ctx.get('agentPresets')` 那一刻读到 undefined。
+2. 旧代码在同一个 `mounted()` 里紧接着就 `void (async () => { restoreReport = await restoreEnabled(core) })()` 重放，而 `applyEnabled` 开头有 `if (enabled && (!runtime || !runtime.supported)) return failure(MSG.serviceUnavailable)` ⇒ 账本里每个 id 当场被拒。
+3. 稍后 `ctx.inject(['agentPresets'], cb)` 确实把注册表 adopt 成功（`supported` 变 true），但**没有任何地方在 adopt 成功后再重放** ⇒ `declared` 永久为空。面板开关读的是 `state.json` 账本（`enabled`），于是「开关是开的」与「会话里选不到」长期并存。
+
+**修法**（`sub-plugins/dsh-agent-preset-manager/src/index.js`）：
+- `adoptRegistry(ctx, runtime, onReady)` 变三参：同步命中就 `ready()`；注入面存在时注册完回调**不结算**（服务可能只是还没组合），回调里 adopt 成功后 `ready()`；没有注入面的旧版（0.1.x）才立即结算成失败报告。
+- 新增 `startReplay()`（`replayInFlight` 防重入；开跑前 `restoreSettled = false`，面板读作「恢复中」）与 `healReplay()`（每个被 adopt 的注册表给一次补跑预算，adopt 时重置）；`mounted()` 改为 `adoptRegistry(ctx, runtime, () => { healUsed = false; startReplay() })`。
+- `migrateRef()`（`/state`、`/bootstrap`、`/migrate` 三个读取点共用）开头调 `healReplay()` ⇒ **面板第一次读就是自愈检查点**；`restoreEnabled` 循环里对 `runtime.getHandles().has(id)` 的 id 直接记 `restored` 跳过 ⇒ 补跑只重试失败项，绝不重复声明。
+- `describe()` 刻意不调 `healReplay()`：避免自检与测试产生副作用。
+
+**可复用结论**：
+- 「服务现在不在」≠「这个版本没有这个服务」：凡是在启动时立刻要用 `ctx.get` 取到的服务做事，都要把「做事」挂在 adopt/注入回调上，而不是挂在同步探测结果上。
+- 重放类逻辑要同时有**幂等**与**补跑预算**：句柄已存在就跳过，补跑只允许由「注册表重新 adopt」或「一次读取」触发，否则面板轮询会把重放打成循环。
+- 账本（用户意图）与事实（当前声明）必须分开呈现：开关读账本、`runtime.declared` 才是事实；两者不一致时要让补跑自动收敛，而不是把「重新开关一次」当解决办法写进错误文案。
+
+**验证**：`node sub-plugins/dsh-agent-preset-manager/test/bundle.test.mjs` → 42/42（新增 3 条：迟到注册表仍重放 / 无注入面时结算而不是挂起 / 首次读 `/state` 自愈且不重复声明）；`node --check src/index.js` 通过。跑法用 `node <file>`——本 harness 里 `node --test <file>` 会 `spawn EPERM`。
+

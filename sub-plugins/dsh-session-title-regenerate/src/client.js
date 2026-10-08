@@ -170,6 +170,20 @@ window.__ModuleLoader__.load({
     const NS = 'session-title-regenerate'
     const COMMAND = '/regenerate-title'
     const RESULT_EVENT = 'session-title-regen:result'
+    /** 核心「本地插件」设置页里的分页槽位（本插件贡献一个 tab）。 */
+    const TAB_SLOT = 'settings.localPlugins.tab'
+    const TAB_ID = 'session-title-regenerate'
+    const TAB_ORDER = 45
+    /** 设置命名空间 = profile 行的 entry id（= 本插件名），与宿主半导出的 Config 对应。 */
+    const SETTINGS_NS = 'session-title-regenerate'
+    /** 推理强度档位全集（与宿主半 REASONING_EFFORTS 同表；off 仍用于写入校验与老配置兼容）。 */
+    const EFFORT_OPTIONS = ['off', 'low', 'medium', 'high', 'max']
+    /** 设置页单选里提供的档位：off 由「思考开关」表达，不再单列一档（否则「思考开 + off」语义自相矛盾）。 */
+    const ACTIVE_EFFORT_OPTIONS = ['low', 'medium', 'high', 'max']
+    /** 三项设置的默认值（与宿主半 DEFAULTS 对齐）。 */
+    const SETTINGS_DEFAULTS = { thinking: false, reasoningEffort: 'off', maxOutputTokens: 512 }
+    const MAX_OUTPUT_TOKENS_MIN = 16
+    const MAX_OUTPUT_TOKENS_MAX = 8192
 
     // --- locale ---------------------------------------------------------------
 
@@ -181,6 +195,33 @@ window.__ModuleLoader__.load({
       'toast.failed': '重新生成标题失败',
       'toast.noCommand': '当前 DSH 版本没有可用的命令通道（remote.commands 缺失）',
       'toast.noSession': '未能定位该会话，请刷新会话列表后重试',
+      'tab.title': '重新生成标题',
+      'settings.intro': '这三项决定 /regenerate-title 调用模型时的思考与输出上限；保存后插件重载，下一次命令生效。',
+      'settings.thinking': '思考开关',
+      'settings.thinkingHint': '关（默认）＝不下发 reasoningEffort，标题生成最省 token；打开后在下面选一个档位（未选过则默认 low）。',
+      'settings.effort': '推理强度',
+      'settings.effortHint': '档位需当前模型支持；不支持时这一次调用会自动去掉该参数重试。',
+      'settings.effort.off': 'off（不思考）',
+      'settings.effort.low': 'low（低）',
+      'settings.effort.medium': 'medium（中）',
+      'settings.effort.high': 'high（高）',
+      'settings.effort.max': 'max（最高）',
+      'settings.effortWhenOff': '当前不思考：本次调用不下发 reasoningEffort（等价 off，最省 token）。打开上面的开关后可选档位。',
+      'settings.maxTokens': '最大输出 tokens',
+      'settings.maxTokensHint': '默认 512（旧默认 100 常被上游截断，报 title output reached maxTokens）；范围 16–8192，离开输入框时自动夹取。',
+      'settings.save': '保存',
+      'settings.saving': '保存中…',
+      'settings.reset': '填入默认值',
+      'settings.reload': '重新读取',
+      'settings.saved': '已保存；插件重载后生效。',
+      'settings.resetReady': '已填入默认值，点「保存」写入。',
+      'settings.dirty': '● 有未保存的改动。',
+      'settings.clean': '当前值与已保存的一致。',
+      'settings.effective': '本次调用：',
+      'settings.effectiveOff': '不下发 reasoningEffort',
+      'settings.effectiveTokens': 'maxTokens ',
+      'settings.noEntry': '还没有这个插件的配置项：先在「本地插件」里启用它，再回到本页。',
+      'settings.error': '设置操作失败：',
     }
 
     const enDict = {
@@ -191,6 +232,33 @@ window.__ModuleLoader__.load({
       'toast.failed': 'Failed to regenerate title',
       'toast.noCommand': 'No command channel available in this DSH build (remote.commands missing)',
       'toast.noSession': 'Could not locate that session; refresh the session list and try again',
+      'tab.title': 'Regenerate title',
+      'settings.intro': 'These three drive the thinking/output budget of /regenerate-title. Saving reloads the plugin; the next command uses the new values.',
+      'settings.thinking': 'Thinking',
+      'settings.thinkingHint': 'Off (default) = no reasoningEffort at all, the cheapest title call. When on, pick a tier below (defaults to low).',
+      'settings.effort': 'Reasoning effort',
+      'settings.effortHint': 'The tier must be supported by the current model, otherwise this call retries without the parameter.',
+      'settings.effort.off': 'off (no thinking)',
+      'settings.effort.low': 'low',
+      'settings.effort.medium': 'medium',
+      'settings.effort.high': 'high',
+      'settings.effort.max': 'max (highest)',
+      'settings.effortWhenOff': 'Not thinking: this call sends no reasoningEffort (equivalent to off, cheapest). Turn the switch on to pick a tier.',
+      'settings.maxTokens': 'Max output tokens',
+      'settings.maxTokensHint': 'Default 512 (the old 100 was truncated upstream as "title output reached maxTokens"); range 16-8192, clamped when the field loses focus.',
+      'settings.save': 'Save',
+      'settings.saving': 'Saving…',
+      'settings.reset': 'Fill in defaults',
+      'settings.reload': 'Reload',
+      'settings.saved': 'Saved; takes effect when the plugin reloads.',
+      'settings.resetReady': 'Defaults filled in — press Save to write them.',
+      'settings.dirty': '● Unsaved changes.',
+      'settings.clean': 'Matches the saved value.',
+      'settings.effective': 'This call: ',
+      'settings.effectiveOff': 'no reasoningEffort',
+      'settings.effectiveTokens': 'maxTokens ',
+      'settings.noEntry': 'This plugin has no config entry yet: enable it under Local plugins first.',
+      'settings.error': 'Settings request failed: ',
     }
 
     var __locale = null
@@ -612,6 +680,339 @@ window.__ModuleLoader__.load({
       observer.observe(document.body, { childList: true, subtree: true })
     }
 
+    // --- settings tab: 思考开关 / 推理强度 / max tokens ------------------------
+
+    /** 设置分页的样式（主题 token，跟随核心明暗）。 */
+    const STY = {
+      wrap: { display: 'flex', flexDirection: 'column', gap: '14px', fontSize: '13px', lineHeight: 1.6 },
+      card: { border: '1px solid var(--dsw-border,rgba(127,127,127,.25))', borderRadius: '10px', padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: '12px' },
+      field: { display: 'flex', flexDirection: 'column', gap: '4px' },
+      row: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' },
+      label: { fontSize: '13px', fontWeight: 500 },
+      hint: { color: 'var(--dsw-text-secondary,#8b8b8b)', fontSize: '12px' },
+      input: { width: '120px', padding: '6px 8px', borderRadius: '6px', border: '1px solid var(--dsw-border,rgba(127,127,127,.3))', background: 'transparent', color: 'inherit', font: 'inherit', boxSizing: 'border-box' },
+      choice: { display: 'inline-flex', alignItems: 'center', gap: '4px', marginRight: '12px', cursor: 'pointer', fontSize: '13px' },
+      btn: { padding: '5px 12px', borderRadius: '6px', border: '1px solid var(--dsw-border,rgba(127,127,127,.3))', background: 'transparent', color: 'inherit', cursor: 'pointer', font: 'inherit' },
+      btnPrimary: { padding: '5px 12px', borderRadius: '6px', border: '1px solid var(--dsw-accent,#4c8bf5)', background: 'var(--dsw-accent,#4c8bf5)', color: '#fff', cursor: 'pointer', font: 'inherit' },
+      ok: { color: 'var(--dsw-success,#2e9e5b)', fontSize: '12px' },
+      bad: { color: 'var(--dsw-danger,#d9534f)', fontSize: '12px' },
+    }
+
+    function describeError(error) {
+      return error && error.message ? String(error.message) : String(error)
+    }
+
+    function isPlainObject(value) {
+      return !!value && typeof value === 'object' && !Array.isArray(value)
+    }
+
+    /** 把输入夹成 [min, max] 内的整数；非数字回落 fallback。 */
+    function clampInt(value, min, max, fallback) {
+      const n = typeof value === 'number' ? value : Number(value)
+      if (!Number.isFinite(n)) return fallback
+      const i = Math.trunc(n)
+      if (i < min) return min
+      if (i > max) return max
+      return i
+    }
+
+    /** 单选里应选中的档位：不在可选表内（off / 空 / 非法）时回落 low。 */
+    function activeEffortOf(effort) {
+      return ACTIVE_EFFORT_OPTIONS.indexOf(effort) >= 0 ? effort : ACTIVE_EFFORT_OPTIONS[0]
+    }
+
+    /** 三项设置是否等价（输出上限按「夹取后的整数」比较，避免 "512" 与 512 被当成改动）。 */
+    function sameSettings(a, b) {
+      const left = a && typeof a === 'object' ? a : {}
+      const right = b && typeof b === 'object' ? b : {}
+      const tokens = (v) => clampInt(
+        v && v.maxOutputTokens,
+        MAX_OUTPUT_TOKENS_MIN,
+        MAX_OUTPUT_TOKENS_MAX,
+        SETTINGS_DEFAULTS.maxOutputTokens,
+      )
+      return (left.thinking === true) === (right.thinking === true)
+        && String(left.reasoningEffort || '') === String(right.reasoningEffort || '')
+        && tokens(left) === tokens(right)
+    }
+
+    /** 「本次调用实际会发什么」的一行回显（开关决定档位是否下发，数字先夹取）。 */
+    function effectiveSummary(value) {
+      const thinking = !!value && value.thinking === true
+      const tokens = clampInt(
+        value && value.maxOutputTokens,
+        MAX_OUTPUT_TOKENS_MIN,
+        MAX_OUTPUT_TOKENS_MAX,
+        SETTINGS_DEFAULTS.maxOutputTokens,
+      )
+      const body = thinking
+        ? 'reasoningEffort = ' + activeEffortOf(value && value.reasoningEffort)
+        : __t('settings.effectiveOff')
+      return __t('settings.effective') + body + ' · ' + __t('settings.effectiveTokens') + String(tokens)
+    }
+
+    /**
+     * 逐候选读取客户端 remote.settings 控制器：每个候选各自 try —— 真身 ctx 对
+     * 未注入的裸属性会抛 `cannot get property "settings" without inject`，
+     * 共用一次 try 会在第一个候选处直接放弃。
+     */
+    function readRemoteSettings(scope) {
+      if (!scope) return null
+      try {
+        if (typeof scope.get === 'function') {
+          const viaGet = scope.get('remote.settings')
+          if (viaGet) return viaGet
+        }
+      } catch { /* 未挂载的名字：下一个候选 */ }
+      try {
+        const viaKey = scope['remote.settings']
+        if (viaKey) return viaKey
+      } catch { /* guarded */ }
+      let remote = null
+      try { if (typeof scope.get === 'function') remote = scope.get('remote') || null } catch { /* 未注入 */ }
+      if (!remote) { try { remote = scope.remote || null } catch { /* guarded */ } }
+      if (remote) {
+        try { const viaRemote = remote.settings || null; if (viaRemote) return viaRemote } catch { /* guarded */ }
+      }
+      try { if (scope.remote && scope.remote.settings) return scope.remote.settings } catch { /* guarded */ }
+      try {
+        if (typeof scope.get === 'function') {
+          const shortGet = scope.get('settings')
+          if (shortGet && typeof shortGet.describe === 'function') return shortGet
+        }
+      } catch { /* 未注入 */ }
+      try {
+        const viaProp = scope.settings || null
+        if (viaProp && typeof viaProp.describe === 'function') return viaProp
+      } catch { /* guarded */ }
+      return null
+    }
+
+    /** 解 typert 信封 {ok,value} / {ok:false,error}。 */
+    function unwrapResult(response) {
+      if (response && typeof response === 'object' && 'ok' in response) {
+        if (response.ok === false) {
+          const err = response.error
+          const message = (err && (err.message || err.code)) || 'settings-request-failed'
+          const failure = new Error(String(message))
+          failure.remoteError = err || null
+          throw failure
+        }
+        return Object.prototype.hasOwnProperty.call(response, 'value') ? response.value : response
+      }
+      return response
+    }
+
+    /** describe() 里本命名空间那一行 → 三个设置项（缺字段/非法值回落默认）。 */
+    function settingsFromRow(row) {
+      const value = isPlainObject(row && row.value) ? row.value : {}
+      return {
+        thinking: value.thinking === true,
+        reasoningEffort: EFFORT_OPTIONS.indexOf(value.reasoningEffort) >= 0
+          ? value.reasoningEffort
+          : SETTINGS_DEFAULTS.reasoningEffort,
+        maxOutputTokens: clampInt(value.maxOutputTokens, MAX_OUTPUT_TOKENS_MIN, MAX_OUTPUT_TOKENS_MAX, SETTINGS_DEFAULTS.maxOutputTokens),
+      }
+    }
+
+    /**
+     * 读一次设置：describe() → 找 ns === SETTINGS_NS 的那一行。
+     * - 参数类型：settings -- remote.settings 控制器（可为 null）。
+     * - 返回值：Promise<{settings, row}>；控制器不可用时抛 settings-unavailable。
+     * - 调用样例：const { settings } = await readSettings(readRemoteSettings(ctx))
+     */
+    async function readSettings(settings) {
+      if (!settings || typeof settings.describe !== 'function') throw new Error('settings-unavailable')
+      const view = unwrapResult(await settings.describe())
+      const namespaces = view && Array.isArray(view.namespaces) ? view.namespaces : []
+      const row = namespaces.find((entry) => entry && entry.ns === SETTINGS_NS) || null
+      return { settings: settingsFromRow(row), row }
+    }
+
+    /**
+     * 写一次设置。update 在设置服务里是深合并，但这里写的都是标量键，
+     * 不存在「删键」问题，所以不需要 replace。
+     * - 参数类型：settings -- remote.settings 控制器；patch -- 三个设置项。
+     * - 返回值：Promise<object> -- 实际写入的归一化值。
+     * - 调用样例：await saveSettings(settings, { thinking: true, reasoningEffort: 'high', maxOutputTokens: 512 })
+     */
+    async function saveSettings(settings, patch) {
+      if (!settings || typeof settings.update !== 'function') throw new Error('settings-unavailable')
+      const source = isPlainObject(patch) ? patch : {}
+      const payload = {
+        thinking: source.thinking === true,
+        reasoningEffort: EFFORT_OPTIONS.indexOf(source.reasoningEffort) >= 0
+          ? source.reasoningEffort
+          : SETTINGS_DEFAULTS.reasoningEffort,
+        maxOutputTokens: clampInt(source.maxOutputTokens, MAX_OUTPUT_TOKENS_MIN, MAX_OUTPUT_TOKENS_MAX, SETTINGS_DEFAULTS.maxOutputTokens),
+      }
+      unwrapResult(await settings.update(SETTINGS_NS, payload, undefined))
+      return payload
+    }
+
+    /** 档位文案（缺翻译时回落档位 id）。 */
+    function effortLabel(id) {
+      const text = __t('settings.effort.' + id)
+      return text === 'settings.effort.' + id ? id : text
+    }
+
+    /**
+     * 设置分页组件（槽位 settings.localPlugins.tab，无 props）。
+     * - 参数类型：无。
+     * - 返回值：React 元素。
+     * - 调用样例：由 slots 以 settings.localPlugins.tab 注册。
+     */
+    function SettingsSection() {
+      useLocaleRevision()
+      const [draft, setDraft] = useState(null)
+      const [busy, setBusy] = useState(null)
+      const [notice, setNotice] = useState(null)
+      const [failure, setFailure] = useState(null)
+      const [baseline, setBaseline] = useState(null) // 最近一次从服务端读到/写回的值，用来算「未保存」
+      const settingsRef = useRef(undefined)
+
+      const settingsOf = () => {
+        if (settingsRef.current === undefined) settingsRef.current = readRemoteSettings(__ctx)
+        return settingsRef.current
+      }
+
+      const load = useCallback(async () => {
+        setBusy('load')
+        setFailure(null)
+        try {
+          const result = await readSettings(settingsOf())
+          setDraft(result.settings)
+          setBaseline(result.settings)
+          setNotice(null)
+        } catch (error) {
+          setFailure(describeError(error))
+        } finally {
+          setBusy(null)
+        }
+      }, [])
+
+      useEffect(() => { load() }, [load])
+
+      const save = useCallback(async () => {
+        if (!draft) return
+        setBusy('save')
+        setNotice(null)
+        setFailure(null)
+        try {
+          const saved = await saveSettings(settingsOf(), draft)
+          setDraft(saved)
+          setBaseline(saved)
+        } catch (error) {
+          setFailure(describeError(error))
+        } finally {
+          setBusy(null)
+        }
+      }, [draft])
+
+      const restoreDefaults = useCallback(() => {
+        setDraft(Object.assign({}, SETTINGS_DEFAULTS))
+        setNotice(__t('settings.resetReady'))
+        setFailure(null)
+      }, [])
+
+      const value = draft || SETTINGS_DEFAULTS
+      const locked = busy !== null
+      const patch = (bucket) => setDraft(Object.assign({}, value, bucket))
+      // 是否有未保存改动（baseline = 最近一次读写成功的值；未加载完成时不算脏）。
+      const dirty = draft !== null && baseline !== null && !sameSettings(draft, baseline)
+
+      // 一行状态区：未保存提示 + 本次调用实际下发的参数，省得用户自己推演三项的相互作用。
+      const statusLine = React.createElement('div', { key: 'status', style: STY.field }, [
+        React.createElement('div', { key: 'dirty', style: dirty ? STY.ok : STY.hint }, dirty ? __t('settings.dirty') : __t('settings.clean')),
+        React.createElement('div', { key: 'effective', style: STY.hint }, effectiveSummary(value)),
+      ])
+
+      const thinkingField = React.createElement('div', { key: 'thinking', style: STY.field }, [
+        React.createElement('div', { key: 'head', style: STY.row }, [
+          React.createElement('input', {
+            key: 'box',
+            type: 'checkbox',
+            checked: value.thinking === true,
+            disabled: locked,
+            style: { margin: 0 },
+            onChange: (event) => {
+              const on = !!(event && event.target && event.target.checked)
+              // 打开时把档位抬到可选表内（默认 low），避免「思考开 + off」这种自相矛盾的组合。
+              patch(on
+                ? { thinking: true, reasoningEffort: activeEffortOf(value.reasoningEffort) }
+                : { thinking: false })
+            },
+          }),
+          React.createElement('span', { key: 'label', style: STY.label }, __t('settings.thinking')),
+        ]),
+        React.createElement('div', { key: 'hint', style: STY.hint }, __t('settings.thinkingHint')),
+      ])
+
+      // 档位：思考关时只解释「不下发」，打开后才出现单选（4 档，无 off —— off 就是关）。
+      const effortField = value.thinking === true
+        ? React.createElement('div', { key: 'effort', style: STY.field }, [
+            React.createElement('div', { key: 'label', style: STY.label }, __t('settings.effort')),
+            React.createElement('div', { key: 'choices', style: STY.row }, ACTIVE_EFFORT_OPTIONS.map((id) => React.createElement('label', {
+              key: id,
+              style: STY.choice,
+            }, [
+              React.createElement('input', {
+                key: 'radio',
+                type: 'radio',
+                name: 'session-title-regen-effort',
+                checked: activeEffortOf(value.reasoningEffort) === id,
+                disabled: locked,
+                style: { margin: 0 },
+                onChange: () => patch({ reasoningEffort: id }),
+              }),
+              React.createElement('span', { key: 'text' }, effortLabel(id)),
+            ]))),
+            React.createElement('div', { key: 'hint', style: STY.hint }, __t('settings.effortHint')),
+          ])
+        : React.createElement('div', { key: 'effort', style: STY.field }, [
+            React.createElement('div', { key: 'label', style: STY.label }, __t('settings.effort')),
+            React.createElement('div', { key: 'hint', style: STY.hint }, __t('settings.effortWhenOff')),
+          ])
+
+      const tokenField = React.createElement('div', { key: 'tokens', style: STY.field }, [
+        React.createElement('div', { key: 'label', style: STY.label }, __t('settings.maxTokens')),
+        React.createElement('input', {
+          key: 'input',
+          type: 'number',
+          min: MAX_OUTPUT_TOKENS_MIN,
+          max: MAX_OUTPUT_TOKENS_MAX,
+          value: String(value.maxOutputTokens),
+          disabled: locked,
+          style: STY.input,
+          // 输入过程中保留原串（否则打不出 8、清空会被立刻弹回旧值），离开输入框时再夹取。
+          onChange: (event) => patch({ maxOutputTokens: event && event.target ? event.target.value : '' }),
+          onBlur: () => patch({ maxOutputTokens: clampInt(value.maxOutputTokens, MAX_OUTPUT_TOKENS_MIN, MAX_OUTPUT_TOKENS_MAX, SETTINGS_DEFAULTS.maxOutputTokens) }),
+        }),
+        React.createElement('div', { key: 'hint', style: STY.hint }, __t('settings.maxTokensHint')),
+      ])
+
+      const actions = React.createElement('div', { key: 'actions', style: STY.row }, [
+        React.createElement('button', { key: 'save', type: 'button', style: STY.btnPrimary, disabled: locked || !draft, onClick: save },
+          busy === 'save' ? __t('settings.saving') : __t('settings.save')),
+        React.createElement('button', { key: 'reset', type: 'button', style: STY.btn, disabled: locked, onClick: restoreDefaults }, __t('settings.reset')),
+        React.createElement('button', { key: 'reload', type: 'button', style: STY.btn, disabled: locked, onClick: load }, __t('settings.reload')),
+      ])
+
+      return React.createElement('div', { style: STY.wrap }, [
+        React.createElement('div', { key: 'card', style: STY.card }, [
+          React.createElement('div', { key: 'intro', style: STY.hint }, __t('settings.intro')),
+          thinkingField,
+          effortField,
+          tokenField,
+          React.createElement('div', { key: 'sep', style: { borderTop: '1px solid var(--dsw-border,rgba(127,127,127,.25))' } }),
+          statusLine,
+        ]),
+        actions,
+        notice ? React.createElement('div', { key: 'notice', style: STY.ok }, notice) : null,
+        failure ? React.createElement('div', { key: 'failure', style: STY.bad }, __t('settings.error') + failure) : null,
+      ])
+    }
+
     // --- feedback overlay host -------------------------------------------------
 
     /**
@@ -711,6 +1112,14 @@ window.__ModuleLoader__.load({
         order: 100,
         ...(__locale ? { locale: NS } : {}),
       }, TitleFeedbackHost))
+      // 核心「本地插件」页里的分页（本插件只贡献这一个 tab，不占用设置导航行）。
+      ctx.slots.inject(TAB_SLOT, () => ctx.slots.register({
+        name: TAB_SLOT,
+        id: TAB_ID,
+        order: TAB_ORDER,
+        label: () => __t('tab.title'),
+        ...(__locale ? { locale: NS } : {}),
+      }, SettingsSection))
       installMenuInjection()
     }
 
@@ -727,6 +1136,21 @@ window.__ModuleLoader__.load({
         findOpenSessionRow,
         readRowTitle,
         __t,
+        SettingsSection,
+        settingsFromRow,
+        readSettings,
+        saveSettings,
+        readRemoteSettings,
+        unwrapResult,
+        clampInt,
+        activeEffortOf,
+        sameSettings,
+        effectiveSummary,
+        TAB_SLOT,
+        SETTINGS_NS,
+        EFFORT_OPTIONS,
+        ACTIVE_EFFORT_OPTIONS,
+        SETTINGS_DEFAULTS,
         reset() {
           __scope = null
           __ctx = null
