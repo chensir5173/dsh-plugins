@@ -20,7 +20,7 @@ import {
   listRepoPluginDirs,
   readPluginMeta,
   rowIdOfDir,
-  linkSpecOf,
+  workspaceDepSpec,
   findRow,
   upsertManaged,
   removeManaged,
@@ -31,7 +31,7 @@ import {
   PLUGINS_DIRNAME,
   pluginRootsOf,
   pluginAbsDirOf,
-  staleLinkSpec,
+  staleDepSpec,
   INTENT_DEBOUNCE_MS,
   mergeIntent,
   applyIntents,
@@ -40,11 +40,14 @@ import {
   BATCH_REASONS,
   removePlan,
   REMOVE_REASONS,
-  LINK_STATES,
-  linkStateOf,
-  sameLinkTarget,
-  relinkPlan,
-  RELINK_REASONS,
+  DEP_STATES,
+  depStateOf,
+  WORKSPACE_SPEC,
+  workspaceStateOf,
+  upsertWorkspaceGlob,
+  samePath,
+  repairPlan,
+  REPAIR_REASONS,
 } from '../src/host-core.js'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
@@ -55,6 +58,8 @@ function jsonEngine() {
   return {
     loadText(text) { return JSON.parse(text) },
     dumpText(rows) { return JSON.stringify(rows) },
+    loadDoc(text) { return JSON.parse(text) },
+    dumpDoc(doc) { return JSON.stringify(doc) },
   }
 }
 
@@ -106,7 +111,7 @@ function samplePlugins(root) {
   assert.equal(bad2.valid, false)
   assert.equal(bad2.error, 'no-plugin-package')
   assert.equal(rowIdOfDir('dsh-session-time-bucket'), 'session-time-bucket')
-  assert.equal(linkSpecOf('D:\\a b\\c'), 'link:D:/a b/c')
+  assert.equal(workspaceDepSpec(), WORKSPACE_SPEC, '写进 profile 的规格永远是 workspace 协议，不含路径')
 }
 
 {
@@ -233,11 +238,13 @@ function samplePlugins(root) {
     dsh: { profile: { bundles: ['@deepseek-ai/dsh-web-app', 'dsh-aaa', 'dsh-bbb', 'dsh-local-plugins'] } },
   }
   const rows = [{ id: 'ccc', name: 'dsh-ccc', disabled: true }] // disabled override for ccc
-  const plan = planMigration({ repoPlugins: plugins, manifest, rows, repoRoot: repo })
+  const plan = planMigration({ repoPlugins: plugins, manifest, rows, repoRoot: repo, workspace: { packages: ['.'] } })
 
   assert.equal(plan.needsMigration, true)
+  assert.equal(plan.workspaceChanged, true, '接管同时补上 workspace 锚点')
+  assert.equal(plan.newWorkspace.packages.includes(workspaceStateOf({}, repo).glob), true)
   const nm = plan.newManifest
-  assert.equal(nm.devDependencies['dsh-aaa'], linkSpecOf(path.join(repo, 'dsh-aaa')))
+  assert.equal(nm.devDependencies['dsh-aaa'], workspaceDepSpec(path.join(repo, 'dsh-aaa')))
   assert.equal(nm.dependencies['dsh-aaa'], undefined)
   assert.equal(nm.dependencies['dsh-local-plugins'], undefined, 'umbrella retired from deps')
   assert.deepEqual(nm.dsh.profile.bundles, ['@deepseek-ai/dsh-web-app', 'dsh-plugin-manager'], 'bundles: only manager remains local')
@@ -259,13 +266,15 @@ function samplePlugins(root) {
   const plugins = listRepoPluginDirs(writeRepo(repo, ['dsh-aaa']) || repo).map((d) => readPluginMeta(repo, d))
   const manifest = {
     dependencies: { 'dsh-plugin-manager': 'link:D:/repo/dsh-plugin-manager' },
-    devDependencies: { 'dsh-aaa': linkSpecOf(path.join(repo, 'dsh-aaa')) },
+    devDependencies: { 'dsh-aaa': workspaceDepSpec(path.join(repo, 'dsh-aaa')) },
     dsh: { profile: { bundles: ['@deepseek-ai/dsh-web-app', 'dsh-plugin-manager'] } },
   }
   const rows = [{ insert: [{ id: 'aaa', name: 'dsh-aaa' }] }]
-  const plan = planMigration({ repoPlugins: plugins, manifest, rows, repoRoot: repo })
+  const anchored = { packages: ['.', workspaceStateOf({}, repo).glob] }
+  const plan = planMigration({ repoPlugins: plugins, manifest, rows, repoRoot: repo, workspace: anchored })
   assert.equal(plan.needsMigration, false, 'migrated profile: no further changes')
   assert.deepEqual(plan.summary.moved, [])
+  assert.equal(plan.workspaceChanged, false, 'workspace 锚点已就位 → 不写文件')
 }
 
 // --- sub-plugins/ nested layout (preferred plugin root) ----------------------
@@ -313,7 +322,7 @@ function samplePlugins(root) {
   const plan = planMigration({ repoPlugins: plugins, manifest, rows: [], repoRoot: repo })
   assert.equal(
     plan.newManifest.devDependencies['dsh-aaa'],
-    linkSpecOf(path.join(repo, PLUGINS_DIRNAME, 'dsh-aaa')),
+    workspaceDepSpec(path.join(repo, PLUGINS_DIRNAME, 'dsh-aaa')),
     'migrated devDep points at sub-plugins/, not the repo root',
   )
 }
@@ -325,20 +334,20 @@ function samplePlugins(root) {
   writeRepo(path.join(repo, PLUGINS_DIRNAME), ['dsh-aaa'])
   const meta = readPluginMeta(repo, 'dsh-aaa')
 
-  assert.equal(staleLinkSpec({ devDependencies: {} }, meta), null, 'absent devDep is not a stale link')
+  assert.equal(staleDepSpec({ devDependencies: {} }, meta), null, 'absent devDep is not a stale link')
   assert.equal(
-    staleLinkSpec({ devDependencies: { 'dsh-aaa': 'link:D:/elsewhere' } }, { name: 'dsh-other', dirPath: meta.dirPath }),
+    staleDepSpec({ devDependencies: { 'dsh-aaa': 'link:D:/elsewhere' } }, { name: 'dsh-other', dirPath: meta.dirPath }),
     null,
     'only the given package name is ours to repair',
   )
   assert.equal(
-    staleLinkSpec({ devDependencies: { 'dsh-aaa': linkSpecOf(meta.dirPath) } }, meta),
+    staleDepSpec({ devDependencies: { 'dsh-aaa': workspaceDepSpec(meta.dirPath) } }, meta),
     null,
     'already-correct spec needs no repair',
   )
   assert.deepEqual(
-    staleLinkSpec({ devDependencies: { 'dsh-aaa': 'link:D:/repo/dsh-aaa' } }, meta),
-    { from: 'link:D:/repo/dsh-aaa', to: linkSpecOf(meta.dirPath) },
+    staleDepSpec({ devDependencies: { 'dsh-aaa': 'link:D:/repo/dsh-aaa' } }, meta),
+    { from: 'link:D:/repo/dsh-aaa', to: workspaceDepSpec(meta.dirPath) },
     'a link pointing at the old flat path is reported with both specs',
   )
 }
@@ -568,13 +577,13 @@ function samplePlugins(root) {
   }
 }
 
-// --- stale-link detection & relink planning ----------------------------------
+// --- dependency-state detection & repair planning ----------------------------
 
-/** Fake link IO for the state matrix: only listed paths exist; realpath is identity. */
-function fakeLinkIo({ exists = [], platform = 'win32' } = {}) {
+/** Fake filesystem for the state matrix: only listed paths exist. */
+function fakeFsIo({ exists = [], platform = 'win32' } = {}) {
   return {
     platform,
-    exists: (p) => exists.some((candidate) => sameLinkTarget(candidate, p, platform)),
+    exists: (p) => exists.some((candidate) => samePath(candidate, p, platform)),
     realpath: (p) => String(p),
   }
 }
@@ -582,78 +591,61 @@ function fakeLinkIo({ exists = [], platform = 'win32' } = {}) {
 {
   const here2 = 'D:/repo/sub-plugins/dsh-aaa'
   const meta = { dir: 'dsh-aaa', name: 'dsh-aaa', dirPath: here2 }
+  const io = fakeFsIo({ exists: [here2] })
+  const anchored = { ok: true, glob: 'D:/repo/sub-plugins/*' }
+  const anchorMissing = { ok: false, glob: 'D:/repo/sub-plugins/*' }
 
   // 无键 → absent
-  assert.equal(linkStateOf({}, meta, fakeLinkIo({ exists: [here2] })), LINK_STATES.absent)
+  assert.equal(depStateOf({}, meta, anchored, io), DEP_STATES.absent)
+  assert.equal(depStateOf({ devDependencies: { 'dsh-aaa': '' } }, meta, anchored, io), DEP_STATES.absent)
 
-  // 正确键 → fresh
-  assert.equal(
-    linkStateOf({ devDependencies: { 'dsh-aaa': linkSpecOf(here2) } }, meta, fakeLinkIo({ exists: [here2] })),
-    LINK_STATES.fresh,
-  )
+  // workspace 协议 + 锚点就位 → fresh
+  assert.equal(depStateOf({ devDependencies: { 'dsh-aaa': workspaceDepSpec() } }, meta, anchored, io), DEP_STATES.fresh)
+  assert.equal(depStateOf({ devDependencies: { 'dsh-aaa': 'workspace:^' } }, meta, anchored, io), DEP_STATES.fresh, 'workspace:^ 也算就位')
 
-  // 仅大小写 / 分隔符差异 → fresh（Windows 上必须容忍）
-  assert.equal(
-    linkStateOf({ devDependencies: { 'dsh-aaa': 'link:D:\\Repo\\Sub-Plugins\\DSH-AAA' } }, meta, fakeLinkIo({ exists: [here2] })),
-    LINK_STATES.fresh,
-  )
-  assert.equal(sameLinkTarget('D:/Repo/X/', 'D:\\Repo\\X', 'win32'), true)
-  assert.equal(sameLinkTarget('/repo/x', '/repo/X', 'linux'), false)
+  // 任何非 workspace 协议（遗留 link: 绝对路径、版本号、file:）→ stale-mismatch（可自动改写）
+  for (const spec of ['link:D:/old/dsh-aaa', 'link:./dsh-aaa', '^1.0.0', 'file:../dsh-aaa']) {
+    assert.equal(depStateOf({ devDependencies: { 'dsh-aaa': spec } }, meta, anchored, io), DEP_STATES.mismatch, spec)
+  }
+  assert.equal(samePath('D:/Repo/X/', 'D:\\Repo\\X', 'win32'), true)
+  assert.equal(samePath('/repo/x', '/repo/X', 'linux'), false)
 
-  // 指向别处（两处都存在）→ stale-mismatch
-  assert.equal(
-    linkStateOf({ devDependencies: { 'dsh-aaa': 'link:D:/old/dsh-aaa' } }, meta, fakeLinkIo({ exists: [here2, 'D:/old/dsh-aaa'] })),
-    LINK_STATES.mismatch,
-  )
-
-  // 目标不存在（但本仓库里有实际目录）→ stale-target-missing
-  assert.equal(
-    linkStateOf({ devDependencies: { 'dsh-aaa': 'link:D:/gone/dsh-aaa' } }, meta, fakeLinkIo({ exists: [here2] })),
-    LINK_STATES.missing,
-  )
+  // workspace 规格没错，但锚点没放行本仓库 → stale-target-missing（可自动补 glob）
+  assert.equal(depStateOf({ devDependencies: { 'dsh-aaa': 'workspace:*' } }, meta, anchorMissing, io), DEP_STATES.missing)
 
   // 连实际目录都不存在 → stale-unresolved（只能提示）
-  assert.equal(
-    linkStateOf({ devDependencies: { 'dsh-aaa': 'link:D:/gone/dsh-aaa' } }, meta, fakeLinkIo({ exists: [] })),
-    LINK_STATES.unresolved,
-  )
-
-  // 非 link: spec → 需要改写
-  assert.equal(
-    linkStateOf({ devDependencies: { 'dsh-aaa': '^1.0.0' } }, meta, fakeLinkIo({ exists: [here2] })),
-    LINK_STATES.mismatch,
-  )
+  assert.equal(depStateOf({ devDependencies: { 'dsh-aaa': 'workspace:*' } }, meta, anchored, fakeFsIo({ exists: [] })), DEP_STATES.unresolved)
 
   // IO 抛错 → unknown（只提示，绝不猜）
-  const throwing = { platform: 'win32', exists: () => true, realpath: () => { throw new Error('boom') } }
-  assert.equal(linkStateOf({ devDependencies: { 'dsh-aaa': linkSpecOf(here2) } }, meta, throwing), LINK_STATES.unknown)
+  const throwing = { platform: 'win32', exists: () => { throw new Error('boom') }, realpath: (p) => String(p) }
+  assert.equal(depStateOf({ devDependencies: { 'dsh-aaa': 'workspace:*' } }, meta, anchored, throwing), DEP_STATES.unknown)
 }
 
 {
-  // relinkPlan：可自动修 / 只能提示 两类分开，且管理器自身不参与
+  // repairPlan：可自动修 / 只能提示 两类分开，且管理器自身不参与
   const derived = [
-    { dir: 'dsh-fresh', name: 'dsh-fresh', dirPath: '/r/dsh-fresh', linkState: LINK_STATES.fresh, linkDeclared: 'link:/r/dsh-fresh', linkExpected: 'link:/r/dsh-fresh' },
-    { dir: 'dsh-absent', name: 'dsh-absent', dirPath: '/r/dsh-absent', linkState: LINK_STATES.absent },
-    { dir: 'dsh-moved', name: 'dsh-moved', dirPath: '/r/sub-plugins/dsh-moved', linkState: LINK_STATES.mismatch, linkDeclared: 'link:/old/dsh-moved' },
-    { dir: 'dsh-gone', name: 'dsh-gone', dirPath: '/r/sub-plugins/dsh-gone', linkState: LINK_STATES.missing, linkDeclared: 'link:/nope/dsh-gone' },
-    { dir: 'dsh-lost', name: 'dsh-lost', dirPath: '/r/sub-plugins/dsh-lost', linkState: LINK_STATES.unresolved, linkDeclared: 'link:/nope/dsh-lost' },
-    { dir: 'dsh-weird', name: 'dsh-weird', dirPath: '/r/dsh-weird', linkState: LINK_STATES.unknown },
-    { dir: MANAGER_DIR, name: MANAGER_DIR, dirPath: '/r/dsh-plugin-manager', linkState: LINK_STATES.mismatch },
+    { dir: 'dsh-fresh', name: 'dsh-fresh', dirPath: '/r/dsh-fresh', depState: DEP_STATES.fresh, depDeclared: WORKSPACE_SPEC, depExpected: WORKSPACE_SPEC },
+    { dir: 'dsh-absent', name: 'dsh-absent', dirPath: '/r/dsh-absent', depState: DEP_STATES.absent },
+    { dir: 'dsh-moved', name: 'dsh-moved', dirPath: '/r/sub-plugins/dsh-moved', depState: DEP_STATES.mismatch, depDeclared: 'link:/old/dsh-moved', depExpected: WORKSPACE_SPEC },
+    { dir: 'dsh-gone', name: 'dsh-gone', dirPath: '/r/sub-plugins/dsh-gone', depState: DEP_STATES.missing, depDeclared: WORKSPACE_SPEC, depExpected: WORKSPACE_SPEC },
+    { dir: 'dsh-lost', name: 'dsh-lost', dirPath: '/r/sub-plugins/dsh-lost', depState: DEP_STATES.unresolved },
+    { dir: 'dsh-weird', name: 'dsh-weird', dirPath: '/r/dsh-weird', depState: DEP_STATES.unknown },
+    { dir: MANAGER_DIR, name: MANAGER_DIR, dirPath: '/r/dsh-plugin-manager', depState: DEP_STATES.mismatch },
   ]
-  const plan = relinkPlan(derived)
+  const plan = repairPlan(derived)
   assert.deepEqual(plan.auto.map((p) => p.dir), ['dsh-moved', 'dsh-gone'])
   assert.deepEqual(plan.manual.map((p) => p.dir), ['dsh-lost', 'dsh-weird'])
   assert.equal(plan.count, 2)
   assert.equal(plan.manualCount, 2)
-  assert.equal(plan.manual[0].reason, RELINK_REASONS[LINK_STATES.unresolved])
-  assert.equal(plan.auto[0].expected, null, '期望值由 host 侧补齐，规划不改形状')
-  assert.equal(relinkPlan(undefined).count, 0)
-  assert.equal(relinkPlan([{ dir: 'x', linkState: LINK_STATES.fresh }]).count, 0)
+  assert.equal(plan.manual[0].reason, REPAIR_REASONS[DEP_STATES.unresolved])
+  assert.equal(plan.auto[0].expected, WORKSPACE_SPEC, '期望值就是 workspace:*')
+  assert.equal(repairPlan(undefined).count, 0)
+  assert.equal(repairPlan([{ dir: 'x', depState: DEP_STATES.fresh }]).count, 0)
 }
 
 {
-  // deriveStates 带上链接态三件套；batchPlan 把「有行且链接陈旧」也纳入开启目标
-  const repoRoot = path.join(tmpRoot, 'linkstate')
+  // deriveStates 带上依赖态三件套；batchPlan 把「有行但依赖待修」也纳入开启目标
+  const repoRoot = path.join(tmpRoot, 'depstate')
   fs.mkdirSync(path.join(repoRoot, 'sub-plugins', 'dsh-aaa'), { recursive: true })
   fs.writeFileSync(path.join(repoRoot, 'sub-plugins', 'dsh-aaa', 'package.json'), JSON.stringify({ name: 'dsh-aaa', main: 'index.js' }))
   fs.mkdirSync(path.join(repoRoot, 'sub-plugins', 'dsh-bbb'), { recursive: true })
@@ -661,40 +653,65 @@ function fakeLinkIo({ exists = [], platform = 'win32' } = {}) {
   const repoPlugins = ['dsh-aaa', 'dsh-bbb'].map((dir) => readPluginMeta(repoRoot, dir))
   const manifest = {
     devDependencies: {
-      'dsh-aaa': 'link:D:/old/dsh-aaa',            // 陈旧：指向别处
-      'dsh-bbb': linkSpecOf(repoPlugins[1].dirPath), // 正常
+      'dsh-aaa': 'link:D:/old/dsh-aaa',   // 遗留绝对路径：要改写成 workspace:*
+      'dsh-bbb': workspaceDepSpec(),       // 正常
     },
   }
   const rows = [
     { id: 'aaa', disabled: false },
     { id: 'bbb', disabled: true },
   ]
-  const io = fakeLinkIo({ exists: [repoPlugins[0].dirPath, repoPlugins[1].dirPath, 'D:/old/dsh-aaa'] })
-  const derived = deriveStates({ repoPlugins, manifest, rows, io })
-  assert.equal(derived[0].linkState, LINK_STATES.mismatch)
-  assert.equal(derived[0].linkDeclared, 'link:D:/old/dsh-aaa')
-  assert.equal(derived[0].linkExpected, linkSpecOf(repoPlugins[0].dirPath))
-  assert.equal(derived[1].linkState, LINK_STATES.fresh)
-  assert.equal(derived[1].linkDeclared, linkSpecOf(repoPlugins[1].dirPath))
+  const io = fakeFsIo({ exists: [repoPlugins[0].dirPath, repoPlugins[1].dirPath] })
+  const derived = deriveStates({ repoPlugins, manifest, rows, workspace: { ok: true }, io })
+  assert.equal(derived[0].depState, DEP_STATES.mismatch)
+  assert.equal(derived[0].depDeclared, 'link:D:/old/dsh-aaa')
+  assert.equal(derived[0].depExpected, WORKSPACE_SPEC)
+  assert.equal(derived[1].depState, DEP_STATES.fresh)
+  assert.equal(derived[1].depDeclared, WORKSPACE_SPEC)
 
   const plan = batchPlan(derived, true)
   const aaa = plan.targets.find((t) => t.dir === 'dsh-aaa')
-  assert.ok(aaa, '有行且链接陈旧的项也要进「全部开启」目标')
+  assert.ok(aaa, '有行且依赖待修的项也要进「全部开启」目标')
   assert.equal(aaa.needsInstall, true)
   const bbb = plan.targets.find((t) => t.dir === 'dsh-bbb')
-  assert.equal(bbb.needsInstall, false, '已停用但链接正确 → 只需写行')
+  assert.equal(bbb.needsInstall, false, '已停用但依赖已就位 → 只需写行')
 
-  // 「未激活(仅依赖)」的陈旧项不凭空补行（保持既有语义；修复走单行开启/重定位）
+  // 「未激活(仅依赖)」的待修项不凭空补行（保持既有语义；修复走单行开启/修复按钮）
   const noRow = deriveStates({
     repoPlugins: [repoPlugins[0]],
     manifest: { devDependencies: { 'dsh-aaa': 'link:D:/old/dsh-aaa' } },
     rows: [],
+    workspace: { ok: true },
     io,
   })
   assert.equal(noRow[0].state, 'inactive')
   const plan2 = batchPlan(noRow, true)
   assert.equal(plan2.targets.length, 0)
   assert.equal(plan2.skipped[0].reason, BATCH_REASONS.inactiveDepOnly)
+}
+
+// --- workspace anchor (pnpm-workspace.yaml) ----------------------------------
+
+{
+  const anchorRepo = path.join(tmpRoot, 'wsanchor')
+  fs.mkdirSync(path.join(anchorRepo, 'sub-plugins', 'dsh-aaa'), { recursive: true })
+  const before = workspaceStateOf({}, anchorRepo)
+  assert.equal(before.ok, false, '空文档里没有放行本仓库的 glob')
+  assert.equal(before.glob.endsWith('sub-plugins/*'), true)
+
+  const up1 = upsertWorkspaceGlob({ packages: ['.'] }, anchorRepo)
+  assert.equal(up1.changed, true)
+  assert.equal(up1.doc.packages.includes(up1.state.glob), true)
+  assert.equal(workspaceStateOf(up1.doc, anchorRepo).ok, true, '补上 glob 后锚点就位')
+  assert.equal(upsertWorkspaceGlob(up1.doc, anchorRepo).changed, false, '已就位 → 幂等，零写入')
+
+  // 迁移自愈：指向旧位置的 glob 被换掉，其它条目与键原样保留
+  const healed = upsertWorkspaceGlob({ packages: ['.', 'D:/old/repo/sub-plugins/*'], nodeLinker: 'hoisted' }, anchorRepo)
+  assert.equal(healed.changed, true)
+  assert.deepEqual(healed.doc.packages.filter((e) => e.indexOf('sub-plugins/*') >= 0), [healed.state.glob])
+  assert.equal(healed.doc.nodeLinker, 'hoisted', '无关的键不动')
+  assert.equal(workspaceStateOf(healed.doc, anchorRepo).staleGlobs.length, 0)
+  assert.equal(upsertWorkspaceGlob({ packages: ['packages/*'] }, anchorRepo).doc.packages.includes('packages/*'), true, '与本仓库无关的 glob 保留')
 }
 
 fs.rmSync(tmpRoot, { recursive: true, force: true })

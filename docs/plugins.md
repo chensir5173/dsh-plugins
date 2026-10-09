@@ -37,9 +37,9 @@ dsh plugin --profile web add <本机仓库根>                                  
 
 - **入口**：设置页左侧一级导航「本地插件」（`settings.section`，`order: 16`）。
 - **能做什么**：列出仓库 `sub-plugins/` 下全部 `dsh-*`（管理器自己不列入），每行一个主开关 + 「移除」；顶部有 **全部开启 / 全部关闭 / 全部移除** 三个批量按钮（按钮上的数字就是本次真正会改动的项数，跳过的旧布局/非插件目录不计）与「一键接管/迁移」。
-- **开关语义**：开 = 自动补 profile `devDependencies` 的 `link:` + 写激活行；关 = 行保留、写 `disabled: true`（可随时再开，不丢配置）；移除 = 删激活行 + 摘依赖（**仓库源码目录保留**）。
-- **全部移除**（破坏性，`POST /__dsh-plugin-manager/remove-all`）：一次清空全部受管子插件的激活行与依赖键、只跑一次 `pnpm install`；源码目录不动，之后可逐个或全部重新启用。**迁移过 profile / 换过 `DSH_HOME` 后**旧 `link:` 是绝对路径、面板只会显示「未激活(仅依赖)」且单行开关不会自愈——先「全部移除」再重新启用，管理器就按子插件当前实际目录重写链接。合并窗口里未落盘的开关点击会随行作废（结果里报出作废条数）。
-- **诊断**：`GET /__dsh-plugin-manager/status`（含 `pendingWrites` 未落盘数、`lastFlushError`、`lastBatch`）、`GET /list`（`batchCounts` 含 `enable`/`disable`/`remove` 三向计数）。
+- **开关语义**：开 = 自动补 profile `devDependencies` 的 `workspace:*`（**不含路径**，可解析性由 `pnpm-workspace.yaml` 的锚点 glob 提供）+ 写激活行；关 = 行保留、写 `disabled: true`（可随时再开，不丢配置）；移除 = 删激活行 + 摘依赖（**仓库源码目录保留**）。
+- **全部移除**（破坏性，`POST /__dsh-plugin-manager/remove-all`）：一次清空全部受管子插件的激活行与依赖键、只跑一次 `pnpm install`；源码目录不动，之后可逐个或全部重新启用。**迁移过 profile / 换过 `DSH_HOME` 后**面板可能显示「未激活(仅依赖)」或横幅「依赖待修复」——先「全部移除」再重新启用，或直接点「修复依赖」，管理器就按当前仓库位置重写 `workspace:*` 与锚点 glob。合并窗口里未落盘的开关点击会随行作废（结果里报出作废条数）。
+- **诊断**：`GET /__dsh-plugin-manager/status`（含 `pendingWrites` 未落盘数、`lastFlushError`、`lastBatch`、`workspace` / `workspaceRepair`）、`GET /list`（`batchCounts` 含 `enable`/`disable`/`remove` 三向计数，`workspace` 为锚点状态，`repairPlan` 为待修依赖）。
 - **注意**：切换带界面的子插件后，面板只会**提示**你刷新，不会自动刷新页面。
 
 ### dsh-composer-history-recall — 输入框历史召回

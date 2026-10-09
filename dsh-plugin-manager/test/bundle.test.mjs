@@ -58,7 +58,7 @@ const state = {
   pendingWrites: 0,
   batchCounts: BATCH_COUNTS(),
   batchResults: null,
-  linkPlan: { count: 0, manualCount: 0, auto: [], manual: [] },
+  repairPlan: { count: 0, manualCount: 0, auto: [], manual: [] },
   uninstall: {
     command: 'node "D:/repo/dsh-plugin-manager/tools/uninstall-manager.mjs" --profile web --yes',
     willRemove: { rows: 2, deps: 2, managerEntry: true, installs: true },
@@ -75,7 +75,7 @@ const state = {
   ],
 }
 function payload() {
-  return { ok: true, data: { repoRoot: 'D:/repo', pluginsRoot: 'D:/repo/sub-plugins', profileName: 'web', legacyDetected: state.legacyDetected, plugins: state.plugins, batchCounts: state.batchCounts, linkPlan: state.linkPlan, autoRelinkEnabled: state.autoRelinkEnabled, uninstall: state.uninstall } }
+  return { ok: true, data: { repoRoot: 'D:/repo', pluginsRoot: 'D:/repo/sub-plugins', profileName: 'web', legacyDetected: state.legacyDetected, plugins: state.plugins, batchCounts: state.batchCounts, repairPlan: state.repairPlan, autoRelinkEnabled: state.autoRelinkEnabled, uninstall: state.uninstall } }
 }
 async function fetchStub(url, opts) {
   fetchCalls.push({ url, opts })
@@ -92,12 +92,12 @@ async function fetchStub(url, opts) {
     }
     return { ok: true, json: async () => payload() }
   }
-  if (url === '/__dsh-plugin-manager/relink') {
+  if (url === '/__dsh-plugin-manager/repair') {
     const res = payload()
     res.relink = state.relinkResult
-    // A real relink repairs what it can: the panel re-renders from the next payload.
+    // A real repair fixes what it can: the panel re-renders from the next payload.
     if (state.relinkResult && state.relinkResult.noop !== true) {
-      state.linkPlan = { count: 0, manualCount: state.linkPlan.manualCount, auto: [], manual: state.linkPlan.manual }
+      state.repairPlan = { count: 0, manualCount: state.repairPlan.manualCount, auto: [], manual: state.repairPlan.manual }
     }
     return { ok: true, json: async () => res }
   }
@@ -726,10 +726,10 @@ test('pure helper exports map every state', () => {
 
 // --- stale links (自检横幅 + 重定位) ----------------------------------------
 
-test('stale links: banner splits repairable vs manual and relink posts once', async () => {
+test('stale deps: banner splits repairable vs manual and repair posts once', async () => {
   fetchCalls.length = 0
   const baselinePlugins = state.plugins
-  state.linkPlan = {
+  state.repairPlan = {
     count: 1,
     manualCount: 1,
     auto: [{ dir: 'dsh-aaa', name: 'dsh-aaa', declared: 'link:D:/old/dsh-aaa', expected: 'link:D:/repo/sub-plugins/dsh-aaa' }],
@@ -737,8 +737,8 @@ test('stale links: banner splits repairable vs manual and relink posts once', as
   }
   state.autoRelinkEnabled = false
   state.plugins = [
-    { dir: 'dsh-aaa', rowId: 'aaa', name: 'dsh-aaa', description: 'AAA plugin', valid: true, hasClient: true, state: 'active', active: true, legacyBundle: false, linkState: 'stale-mismatch', linkDeclared: 'link:D:/old/dsh-aaa' },
-    { dir: 'dsh-bbb', rowId: 'bbb', name: 'dsh-bbb', description: 'BBB plugin', valid: true, hasClient: true, state: 'inactive', active: false, legacyBundle: false, linkState: 'stale-unresolved', linkDeclared: 'link:D:/nope/dsh-bbb' },
+    { dir: 'dsh-aaa', rowId: 'aaa', name: 'dsh-aaa', description: 'AAA plugin', valid: true, hasClient: true, state: 'active', active: true, legacyBundle: false, depState: 'stale-mismatch', depDeclared: 'link:D:/old/dsh-aaa' },
+    { dir: 'dsh-bbb', rowId: 'bbb', name: 'dsh-bbb', description: 'BBB plugin', valid: true, hasClient: true, state: 'inactive', active: false, legacyBundle: false, depState: 'stale-unresolved', depDeclared: 'link:D:/nope/dsh-bbb' },
   ]
   const section = mountSection()
   fresh()
@@ -747,19 +747,19 @@ test('stale links: banner splits repairable vs manual and relink posts once', as
   begin()
   const tree = section()
   const texts = textOf(tree)
-  assert.match(texts, /检测到 2 条陈旧链接：1 条可自动修复、1 条需人工处理/, 'banner counts both buckets')
+  assert.match(texts, /检测到 2 处依赖待修复：1 处可自动修复、1 处需人工处理/, 'banner counts both buckets')
   assert.match(texts, /link:D:\/old\/dsh-aaa → link:D:\/repo\/sub-plugins\/dsh-aaa/, 'declared vs expected shown')
-  assert.match(texts, /自动重定位已关闭/, 'switch state is visible')
-  assert.match(texts, /链接陈旧/, 'row badge for a stale link')
+  assert.match(texts, /自动修复依赖已关闭/, 'switch state is visible')
+  assert.match(texts, /依赖待修复/, 'row badge for a deprecated declaration')
 
-  const relinkBtn = byType(tree, 'button').find((b) => /^重定位$/.test(textOf(b)))
-  assert.ok(relinkBtn, 'relink button rendered when something is repairable')
+  const relinkBtn = byType(tree, 'button').find((b) => /^修复依赖$/.test(textOf(b)))
+  assert.ok(relinkBtn, 'repair button rendered when something is repairable')
   relinkBtn.props.onClick()
   await flush()
-  assert.ok(fetchCalls.some((c) => c.url === '/__dsh-plugin-manager/relink'), 'relink endpoint called')
+  assert.ok(fetchCalls.some((c) => c.url === '/__dsh-plugin-manager/repair'), 'repair endpoint called')
 
   // No stale links → no banner, no button.
-  state.linkPlan = { count: 0, manualCount: 0, auto: [], manual: [] }
+  state.repairPlan = { count: 0, manualCount: 0, auto: [], manual: [] }
   state.autoRelinkEnabled = true
   state.plugins = baselinePlugins
   begin()
@@ -771,7 +771,7 @@ test('stale links: banner splits repairable vs manual and relink posts once', as
   begin()
   const clean = section()
   assert.doesNotMatch(textOf(clean), /陈旧链接/, 'banner hidden when nothing is stale')
-  assert.equal(byType(clean, 'button').filter((b) => /^重定位$/.test(textOf(b))).length, 0, 'no relink button when clean')
+  assert.equal(byType(clean, 'button').filter((b) => /^修复依赖$/.test(textOf(b))).length, 0, 'no repair button when clean')
 })
 
 test('uninstall: the panel shows what will be removed and copies the command', async () => {
@@ -791,7 +791,7 @@ test('uninstall: the panel shows what will be removed and copies the command', a
     const tree = section()
     const texts = textOf(tree)
     assert.match(texts, /卸载管理器（含全部子插件）/, 'uninstall block renders')
-    assert.match(texts, /将删除 2 条激活行、2 个 link 依赖键/, 'preview counts come from the payload')
+    assert.match(texts, /将删除 2 条激活行、2 个依赖键/, 'preview counts come from the payload')
     assert.match(texts, /uninstall-manager\.mjs/, 'the command is visible in the panel')
     const copyBtn = byType(tree, 'button').find((b) => /复制卸载命令/.test(textOf(b)))
     assert.ok(copyBtn, 'copy button rendered')

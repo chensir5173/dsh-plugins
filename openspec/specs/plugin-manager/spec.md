@@ -1,5 +1,24 @@
 # plugin-manager Specification
 
+> ### ⚠️ 2026-10-09 变更（A15）：依赖声明改用 pnpm workspace 协议
+>
+> 自本日起，下文所有「在 profile devDependencies 写入 `link:<子插件的绝对目录>`」一律按下述读：
+> 写入的是 **`"<name>": "workspace:*"`（不含任何路径）**；可解析性由 profile 的 `pnpm-workspace.yaml` 里
+> **唯一一条**指向本仓库插件目录的 glob（`<repo>/sub-plugins/*`）提供，该 glob 由管理器自动维护与自愈
+> （`workspaceStateOf()` / `upsertWorkspaceGlob()`，幂等：已就位时零写入）。
+>
+> 连带变化（逐条规格文本随下一次 openspec 归档一并更新）：
+>
+> - 状态词表：`fresh` = 规格是 `workspace:` 协议 **且** 锚点放行本仓库；`stale-mismatch` = 规格不是 `workspace:`（遗留 `link:` / 版本号 / `file:`）；
+>   `stale-target-missing` = 规格对但**锚点缺失或指向旧位置**；`stale-unresolved` = 仓库里连插件目录都不存在；`unknown` = IO 失败。
+> - 函数改名：`linkStateOf → depStateOf`、`staleLinkSpec → staleDepSpec`、`relinkPlan → repairPlan`、`LINK_STATES → DEP_STATES`、`LINK_IO → FS_IO`；
+>   派生字段 `linkState/linkDeclared/linkExpected → depState/depDeclared/depExpected`。
+> - 新增：`WORKSPACE_FILE`、`WORKSPACE_PROTOCOL`、`WORKSPACE_SPEC`（`workspace:*`）、`isWorkspaceSpec`、`workspaceDepSpec`、`pluginsGlobOf`、`workspaceGlobCandidates`、`isPluginGlobShape`。
+> - 卸载范围：受管依赖键按**包名**识别（`workspace:*` 不含路径），并额外摘掉 `pnpm-workspace.yaml` 里本仓库那条 glob。
+> - 面板与端点：「重定位」→「修复依赖」、`POST /__dsh-plugin-manager/relink` → `/repair`（前者保留为别名）、`/list` 的 `linkPlan` → `repairPlan`。
+> - 管理器自身那条 `link:<repo>` 属于**安装入口**（由 `dsh plugin add` 写入），管理器不自行改写它。
+
+
 ## Purpose
 在 DSH Web 设置页提供一个「本地插件」面板，让用户只安装 `dsh-plugin-manager` 一个插件即可管理本仓库（monorepo）内全部 `dsh-*` 子插件在 web profile 中的激活状态：列出子包与各自状态、一键激活/停用/移除、缺失依赖时自动安装、以及把旧的「逐个 dependencies+bundles」布局一键迁移为新模型。
 ## Requirements

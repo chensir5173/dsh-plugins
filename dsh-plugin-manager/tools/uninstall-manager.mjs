@@ -4,13 +4,16 @@
 // The core CLI (dsh plugin --profile web remove dsh-plugin-manager) is a thin
 // pnpm forwarder that only reconciles dsh.profile.bundles — it does not know
 // about the activation rows this manager wrote into the profile cordis.patch.yml,
-// and it does not touch the sub-plugins' link: dependencies. Removing the manager
-// alone therefore leaves dangling rows and dead links behind, and the next dsh web
-// start fails with: failed to import loader entry <id> …: Cannot find package …
+// and it does not touch the sub-plugins' devDependencies or the workspace anchor.
+// Removing the manager alone therefore leaves dangling rows and unmanaged
+// dependencies behind, and the next dsh web start fails with:
+// failed to import loader entry <id> …: Cannot find package …
 //
 // This script does the whole job without the DSH host and without the dsh CLI: it
-// removes every managed sub-plugin row plus the link dependencies pointing into
-// this repository, then removes the manager dependency key and its
+// removes every managed sub-plugin row plus the dependency keys pointing at this
+// repository (workspace:* entries, and legacy link: specs into the repo), drops
+// this repo's glob from the profile pnpm-workspace.yaml, then removes the manager
+// dependency key and its
 // dsh.profile.bundles entry, then runs ONE pnpm install.
 //
 // Safety: both profile files are backed up as <file>.bak-<ts> first; NOTHING is
@@ -47,6 +50,10 @@ import {
   removeManaged,
   repoRootOfPluginSrc,
   writePatchRows,
+  isPluginGlobShape,
+  pluginsGlobOf,
+  samePath,
+  WORKSPACE_FILE,
 } from '../src/host-core.js'
 
 const SEPARATOR = String.fromCharCode(92)
@@ -93,6 +100,7 @@ export function resolveProfile({ home = dshHome(), profile = DEFAULT_PROFILE } =
     profileDir: profileDirOf(home, profile),
     patchFile: patchPathOf(home, profile),
     manifestFile: manifestPathOf(home, profile),
+    workspaceFile: path.join(profileDirOf(home, profile), WORKSPACE_FILE),
   }
 }
 
@@ -151,11 +159,17 @@ export function planUninstall({ profileDir, repoRoot, engine, profile = DEFAULT_
     }
   }
 
+  // A managed dependency key is either one of THIS repo's plugin packages (the
+  // workspace:* form carries no path, so the package name is the only handle) or a
+  // legacy absolute link: spec pointing into the repo (pre-migration profiles).
+  const managedNames = new Set(managed.map((meta) => meta.name))
   const depNames = []
   for (const field of ['dependencies', 'devDependencies']) {
     const map = manifest[field] || {}
     for (const [name, spec] of Object.entries(map)) {
       if (name === MANAGER_ID) continue
+      if (depNames.includes(name)) continue
+      if (managedNames.has(name)) { depNames.push(name); continue }
       if (typeof spec !== 'string' || spec.indexOf('link:') !== 0) continue
       const target = spec.slice('link:'.length)
       if (insideRoots(target, roots)) depNames.push(name)
@@ -187,11 +201,36 @@ export function planUninstall({ profileDir, repoRoot, engine, profile = DEFAULT_
     }
   }
 
+  // The workspace anchor: this repo contributed one glob to the profile
+  // pnpm-workspace.yaml. Drop it (shape-matched, so a glob left behind by an older
+  // clone location goes too); every other entry and key stays byte-identical.
+  const workspaceFile = path.join(profileDir, WORKSPACE_FILE)
+  let workspaceDoc = null
+  let nextWorkspaceDoc = null
+  try {
+    if (fs.existsSync(workspaceFile) && engine && typeof engine.loadDoc === 'function') {
+      const wsText = fs.readFileSync(workspaceFile, 'utf8')
+      if (wsText.trim() !== '') {
+        const doc = engine.loadDoc(wsText)
+        if (Array.isArray(doc.packages)) {
+          const kept = doc.packages.filter((e) => typeof e !== 'string' || (!isPluginGlobShape(e) && !samePath(e, pluginsGlobOf(repoRoot))))
+          workspaceDoc = doc
+          nextWorkspaceDoc = { ...doc, packages: kept }
+        }
+      }
+    }
+  } catch {
+    workspaceDoc = null
+    nextWorkspaceDoc = null
+  }
+  const workspaceChanged = Boolean(workspaceDoc && nextWorkspaceDoc && workspaceDoc.packages.length !== nextWorkspaceDoc.packages.length)
+
   return {
     profileDir,
     profileName: profile,
     patchFile,
     manifestFile,
+    workspaceFile,
     repoRoot,
     rows,
     nextRows,
@@ -201,11 +240,15 @@ export function planUninstall({ profileDir, repoRoot, engine, profile = DEFAULT_
     depNames,
     managerEntry,
     managerDependency,
+    workspaceDoc,
+    nextWorkspaceDoc,
+    workspaceChanged,
     summary: {
       rows: rowIds.length,
       deps: depNames.length,
       managerEntry: managerEntry || managerDependency,
-      installs: rowIds.length > 0 || depNames.length > 0 || managerEntry || managerDependency,
+      workspaceChanged,
+      installs: rowIds.length > 0 || depNames.length > 0 || managerEntry || managerDependency || workspaceChanged,
     },
   }
 }
@@ -238,7 +281,7 @@ export function writeJsonPretty(file, obj) {
  */
 export async function runUninstall(plan, { pnpm, dryRun = false, engine } = {}) {
   if (dryRun) return { dryRun: true, noop: false, wrote: false, installed: false, plan: plan.summary }
-  if (plan.rowIds.length === 0 && plan.depNames.length === 0 && !plan.summary.managerEntry) {
+  if (plan.rowIds.length === 0 && plan.depNames.length === 0 && !plan.summary.managerEntry && !plan.workspaceChanged) {
     return { dryRun: false, noop: true, wrote: false, installed: false }
   }
   const backups = []
@@ -263,6 +306,17 @@ export async function runUninstall(plan, { pnpm, dryRun = false, engine } = {}) 
   } catch (error) {
     const message = (error && error.message) ? error.message : String(error)
     return { noop: false, wrote, installed: false, backups, error: 'manifest write failed: ' + message }
+  }
+  if (plan.workspaceChanged && plan.nextWorkspaceDoc) {
+    const backedWorkspace = backupFile(plan.workspaceFile)
+    if (backedWorkspace !== null) backups.push(backedWorkspace)
+    try {
+      fs.writeFileSync(plan.workspaceFile, engine.dumpDoc(plan.nextWorkspaceDoc), 'utf8')
+      wrote = true
+    } catch (error) {
+      const message = (error && error.message) ? error.message : String(error)
+      return { noop: false, wrote, installed: false, backups, error: 'workspace write failed: ' + message }
+    }
   }
 
   const runner = typeof pnpm === 'function' ? pnpm : defaultPnpmRunner
@@ -319,7 +373,7 @@ async function main() {
   const plan = planUninstall({ profileDir: target.profileDir, repoRoot, engine: loaded.engine, profile: args.profile })
   const s = plan.summary
   process.stdout.write('profile: ' + target.profileDir + NEWLINE)
-  process.stdout.write('will remove: ' + s.rows + ' activation row(s), ' + s.deps + ' link dependency key(s), manager entry: ' + (s.managerEntry ? 'yes' : 'no') + '; pnpm install: ' + (s.installs ? 'yes (once)' : 'no') + NEWLINE)
+  process.stdout.write('will remove: ' + s.rows + ' activation row(s), ' + s.deps + ' dependency key(s), manager entry: ' + (s.managerEntry ? 'yes' : 'no') + '; pnpm install: ' + (s.installs ? 'yes (once)' : 'no') + NEWLINE)
   process.stdout.write('source directories are never deleted.' + NEWLINE)
   if (!args.yes) {
     process.stdout.write('dry run — pass --yes to execute.' + NEWLINE)
@@ -339,7 +393,7 @@ async function main() {
     if (result.retry) process.stderr.write('rows and keys are already clean — finish with: ' + result.retry + NEWLINE)
     return 1
   }
-  process.stdout.write('removed ' + plan.rowIds.length + ' row(s), ' + plan.depNames.length + ' link key(s), manager entry: ' + (s.managerEntry ? 'yes' : 'no') + '; pnpm install ran once.' + NEWLINE)
+  process.stdout.write('removed ' + plan.rowIds.length + ' row(s), ' + plan.depNames.length + ' dependency key(s), manager entry: ' + (s.managerEntry ? 'yes' : 'no') + '; pnpm install ran once.' + NEWLINE)
   process.stdout.write('backups: ' + ((result.backups || []).join(', ') || '(none needed)') + NEWLINE)
   process.stdout.write('restart dsh web to pick up the removal.' + NEWLINE)
   return 0

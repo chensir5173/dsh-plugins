@@ -82,7 +82,7 @@ const {
   __autoRelinkOnce,
   HOST_DIAG,
 } = await import(pathToFileURL(indexPath).href)
-const { linkSpecOf } = await import(pathToFileURL(path.join(here, '..', 'src', 'host-core.js')).href)
+const { workspaceDepSpec } = await import(pathToFileURL(path.join(here, '..', 'src', 'host-core.js')).href)
 
 // --- fake web server + req/res ----------------------------------------------
 
@@ -216,7 +216,7 @@ try {
   // --- 陈旧链接：单行启用时修复（恰好一次 install） --------------------------
   {
     const dir = ROWS[1]
-    const currentSpec = linkSpecOf(path.join(repoRoot, 'sub-plugins', dir))
+    const currentSpec = workspaceDepSpec(path.join(repoRoot, 'sub-plugins', dir))
     fs.writeFileSync(patchFile, seedRows(), 'utf8')
     const m = manifest()
     m.devDependencies[dir] = `link:D:/gone/${dir}`
@@ -228,7 +228,7 @@ try {
     assert.equal(installs, 1, '陈旧链接被修复时恰好一次 pnpm install')
     assert.equal(manifest().devDependencies[dir], currentSpec, 'link: 被改写为当前实际目录')
     const listed = (res.json.data.plugins || []).find((p) => p.dir === dir)
-    assert.equal(listed.linkState, 'fresh', '响应里的链接态已回到 fresh')
+    assert.equal(listed.depState, 'fresh', '响应里的链接态已回到 fresh')
   }
 
   // --- 链接已正确：不写 package.json、不安装 --------------------------------
@@ -252,7 +252,7 @@ try {
     assert.equal(installs, 1, '重定位两个条目只跑一次 install')
     assert.equal(res.json.relink.relinked.length, 2)
     for (const dir of ROWS) {
-      assert.equal(manifest().devDependencies[dir], linkSpecOf(path.join(repoRoot, 'sub-plugins', dir)))
+      assert.equal(manifest().devDependencies[dir], workspaceDepSpec(path.join(repoRoot, 'sub-plugins', dir)))
     }
     assert.equal(res.json.data.linkPlan.count, 0, '修完后面板不再报陈旧')
     const again = await call('POST', URL_('relink'), {})

@@ -41,6 +41,17 @@ export const RETIRED_PLUGIN_DIRS = [
   // the stopgap for that gap and is now redundant. Source kept for reference.
   'dsh-open-session-workdir',
 ]
+/**
+ * Profile workspace anchor file. pnpm reads <profile>/pnpm-workspace.yaml as the
+ * workspace-root manifest; the manager keeps exactly ONE entry in it (a glob
+ * pointing at this repo's plugin root) so every managed sibling can be declared
+ * as a plain `workspace:*` dependency — no absolute path per package.
+ */
+export const WORKSPACE_FILE = 'pnpm-workspace.yaml'
+/** pnpm workspace protocol prefix — the only spec form the manager writes. */
+export const WORKSPACE_PROTOCOL = 'workspace:'
+/** Exact spec written for a managed sibling ('workspace:*', never a path). */
+export const WORKSPACE_SPEC = 'workspace:*'
 /** Profile devDependency the host needs for patch-file YAML round-trips. */
 export const YAML_PKG = 'js-yaml'
 export const YAML_PKG_RANGE = '^4.1.0'
@@ -84,28 +95,75 @@ export function rowIdOfDir(dir) {
   return dir.startsWith(PLUGIN_DIR_PREFIX) ? dir.slice(PLUGIN_DIR_PREFIX.length) : dir
 }
 
-/** Absolute link: spec used in profile package.json (forward slashes). */
-export function linkSpecOf(absDir) {
-  return `link:${absDir.replace(/\\/g, '/')}`
+/** True when a devDependency spec uses pnpm's workspace protocol. */
+export function isWorkspaceSpec(spec) {
+  return typeof spec === 'string' && spec.startsWith(WORKSPACE_PROTOCOL)
+}
+
+/** The devDependency spec a managed sibling carries: 'workspace:*', never a path. */
+export function workspaceDepSpec() {
+  return WORKSPACE_SPEC
+}
+
+/** Forward-slashed path (Windows separators never reach the YAML we write). */
+export function forwardPath(value) {
+  return String(value).split('\\').join('/')
 }
 
 /**
- * Compare one plugin's profile devDependency spec with the spec its CURRENT
- * directory requires. Returns null when there is nothing to repair (or when the
- * package is not one of our devDependencies); otherwise {from, to}.
- * This is what makes enabling a plugin self-heal a link left behind by a layout
- * move (e.g. dirs relocated into sub-plugins/).
+ * 功能作用：比较两个路径是否指向同一处——按目标平台决定是否大小写敏感，并把反斜杠/
+ *           正斜杠与结尾分隔符归一化（Windows 上 D:/Repo/x 与 D:\Repo\X 视为同一处）。
+ * 参数：
+ *   a: string -- 路径，例 'D:/Repo/x/'
+ *   b: string -- 路径，例 'D:\Repo\X'
+ *   platform: string -- 目标平台，例 'win32' | 'darwin' | 'linux'
+ * 返回值：
+ *   boolean -- 同处为 true，例 true
+ * 调用样例：
+ *   if (samePath('D:/repo/x/', 'D:\\Repo\\X', 'win32')) { ... }
  */
-export function staleLinkSpec(manifest, meta) {
-  const dev = (manifest && manifest.devDependencies) || {}
-  const current = dev[meta.name]
-  if (typeof current !== 'string') return null
-  const want = linkSpecOf(meta.dirPath)
-  return current === want ? null : { from: current, to: want }
+export function samePath(a, b, platform = process.platform) {
+  const norm = (v) => forwardPath(v).replace(/\/+$/, '')
+  const left = norm(a)
+  const right = norm(b)
+  const caseInsensitive = platform === 'win32' || platform === 'darwin'
+  return caseInsensitive ? left.toLowerCase() === right.toLowerCase() : left === right
 }
 
-/** Machine-readable link states (host payload and panel copy share this vocabulary). */
-export const LINK_STATES = {
+/**
+ * Candidate workspace globs (`<plugin-root>/*`) for every scanned root, most
+ * specific first: `<repo>/sub-plugins/*` before the legacy flat `<repo>/*`.
+ * The pnpm-workspace.yaml entry is what makes a plain workspace:* dependency
+ * resolvable, so it is the ONE path the profile still has to carry — and the
+ * manager rewrites it on every start, which is what makes a moved or cloned
+ * repo self-heal instead of failing with ERR_PNPM_WORKSPACE_PKG_NOT_FOUND.
+ */
+/**
+ * A workspace glob that points at SOME clone of this project: `<root>/sub-plugins/*`
+ * (or the legacy flat `<root>/*`, matched through workspaceGlobCandidates).
+ * Shape matching — not path matching — is what lets a profile carried over from
+ * another machine drop the glob that pointed at the OLD repository location;
+ * unrelated globs (packages/*, apps/*) are never touched.
+ */
+export function isPluginGlobShape(entry) {
+  if (typeof entry !== 'string') return false
+  const norm = forwardPath(entry).replace(/\/+$/, '')
+  return norm === PLUGINS_DIRNAME + '/*' || norm.endsWith('/' + PLUGINS_DIRNAME + '/*')
+}
+
+export function workspaceGlobCandidates(repoRoot) {
+  return pluginRootsOf(repoRoot).map((root) => forwardPath(path.join(root, '*')).replace(/\/+$/, ''))
+}
+
+/** The glob the manager maintains: the first (most specific) plugin root. */
+export function pluginsGlobOf(repoRoot) {
+  return workspaceGlobCandidates(repoRoot)[0]
+}
+
+/**
+ * Machine-readable dependency states (host payload and panel copy share this vocabulary).
+ */
+export const DEP_STATES = {
   absent: 'absent',
   fresh: 'fresh',
   mismatch: 'stale-mismatch',
@@ -115,11 +173,10 @@ export const LINK_STATES = {
 }
 
 /**
- * Default IO for {@link linkStateOf}: the real filesystem. Tests inject a fake so
- * the matrix (case-only differences, missing targets, realpath failures) is
- * asserted without touching disk.
+ * Default IO for {@link depStateOf}: the real filesystem. Tests inject a fake so
+ * the matrix (missing directories, IO failures) is asserted without touching disk.
  */
-export const LINK_IO = {
+export const FS_IO = {
   platform: process.platform,
   exists: (p) => { try { return fs.existsSync(p) } catch { return false } },
   realpath: (p) => {
@@ -129,75 +186,113 @@ export const LINK_IO = {
 }
 
 /**
- * 功能作用：比较两个路径是否指向同一条链接目标——按目标平台决定是否大小写敏感，
- *           并把反斜杠/正斜杠与结尾分隔符归一化（Windows 上 D:/Repo/x 与 D:\Repo\X 视为同一处）。
+ * 功能作用：读一个 workspace 文档（pnpm-workspace.yaml 的解析结果）并判定它是否已经放行本仓库
+ *           的插件目录，同时给出当前应维护的 glob 与发现的陈旧 glob（只读，纯函数）。
+ *           迁移/换盘后旧路径的 glob 会在这里被判成 staleGlobs，管理器据此自愈。
  * 参数：
- *   a: string -- 路径，例 'D:/Repo/x/'
- *   b: string -- 路径，例 'D:\Repo\X'
- *   platform: string -- 目标平台，例 'win32' | 'darwin' | 'linux'
+ *   doc: object -- pnpm-workspace.yaml 解析结果，例 { packages: ['.', 'C:/repo/sub-plugins/*'] }
+ *   repoRoot: string -- 本仓库根，例 'C:/repo'
+ *   platform?: string -- 路径比较平台，默认 process.platform
  * 返回值：
- *   boolean -- 同处为 true，例 true
+ *   { file, glob, candidates, packages, hasGlob, staleGlobs, ok }
+ *   例：workspaceStateOf({ packages: ['.'] }, 'C:/repo') → { ok: false, glob: 'C:/repo/sub-plugins/*', ... }
  * 调用样例：
- *   if (sameLinkTarget('D:/repo/x/', 'D:\\Repo\\X', 'win32')) { ... }
+ *   const ws = workspaceStateOf(doc, repoRoot)   // ws.ok === false 表示 glob 缺失，需要补
  */
-export function sameLinkTarget(a, b, platform = process.platform) {
-  const norm = (v) => String(v).split('\\').join('/').replace(/\/+$/, '')
-  const left = norm(a)
-  const right = norm(b)
-  const caseInsensitive = platform === 'win32' || platform === 'darwin'
-  return caseInsensitive ? left.toLowerCase() === right.toLowerCase() : left === right
+export function workspaceStateOf(doc, repoRoot, platform = process.platform) {
+  const glob = pluginsGlobOf(repoRoot)
+  const candidates = workspaceGlobCandidates(repoRoot)
+  const packages = Array.isArray(doc && doc.packages)
+    ? doc.packages.filter((e) => typeof e === 'string' && e.trim() !== '')
+    : []
+  const hasGlob = packages.some((e) => samePath(e, glob, platform))
+  const staleGlobs = packages.filter((e) => (isPluginGlobShape(e) || candidates.some((c) => samePath(e, c, platform))) && !samePath(e, glob, platform))
+  return { file: WORKSPACE_FILE, glob, candidates, packages, hasGlob, staleGlobs, ok: hasGlob }
 }
 
 /**
- * 功能作用：判定一个子插件的 profile devDependency 链接态（只读，不写任何文件）——
- *           absent（无键）/ fresh（指向当前实际目录）/ stale-mismatch（指向别处）/
- *           stale-target-missing（目标不存在）/ stale-unresolved（连本仓库里的实际目录都没有）/
- *           unknown（realpath 等 IO 失败）。
+ * 功能作用：把本仓库的插件 glob 补进（或修正进）workspace 文档——同一份文档里指向本仓库旧
+ *           位置的 glob 会被替换掉（换机器/换盘后自愈的关键一步）。纯函数，返回新文档。
  * 参数：
- *   manifest: object -- profile package.json，例 { devDependencies: { 'dsh-aaa': 'link:D:/repo/sub-plugins/dsh-aaa' } }
+ *   doc: object -- pnpm-workspace.yaml 解析结果（缺失或非法时按空对象处理）
+ *   repoRoot: string -- 本仓库根，例 'C:/repo'
+ *   platform?: string -- 路径比较平台
+ * 返回值：
+ *   { doc: object, changed: boolean, state: object }
+ *   例：upsertWorkspaceGlob({ packages: ['.'] }, 'C:/repo') → { changed: true, doc: { packages: ['.', 'C:/repo/sub-plugins/*'] } }
+ * 调用样例：
+ *   const next = upsertWorkspaceGlob(doc, repoRoot); if (next.changed) writeDoc(next.doc)
+ */
+export function upsertWorkspaceGlob(doc, repoRoot, platform = process.platform) {
+  const state = workspaceStateOf(doc, repoRoot, platform)
+  if (state.ok && state.staleGlobs.length === 0) return { doc, changed: false, state }
+  const kept = state.packages.filter((e) => !isPluginGlobShape(e) && !state.candidates.some((c) => samePath(e, c, platform)))
+  const base = (doc && typeof doc === 'object' && !Array.isArray(doc)) ? doc : {}
+  return { doc: { ...base, packages: [...kept, state.glob] }, changed: true, state }
+}
+
+/**
+ * 功能作用：判定一个子插件的 profile devDependency 是否已按 workspace 协议就位（只读，不写文件）——
+ *           absent（无键）/ fresh（spec 为 workspace: 且 workspace 锚点已放行本仓库）/
+ *           stale-mismatch（仍是遗留的 link: 或别的规格）/ stale-target-missing（workspace 锚点缺失）
+ *           / stale-unresolved（本仓库里连插件目录都不存在）/ unknown（IO 失败）。
+ * 参数：
+ *   manifest: object -- profile package.json，例 { devDependencies: { 'dsh-aaa': 'workspace:*' } }
  *   meta: object -- readPluginMeta() 的结果，例 { name: 'dsh-aaa', dirPath: 'D:/repo/sub-plugins/dsh-aaa' }
+ *   workspace: object -- workspaceStateOf() 的结果（ok=true 表示 glob 已就位）
  *   io: object -- { platform, exists, realpath }，默认真实文件系统（测试注入假实现）
  * 返回值：
- *   string -- LINK_STATES 之一，例 'stale-target-missing'
+ *   string -- DEP_STATES 之一，例 'stale-mismatch'
  * 调用样例：
- *   const state = linkStateOf(manifest, meta); if (state === LINK_STATES.missing) { ... }
+ *   const state = depStateOf(manifest, meta, workspaceStateOf(doc, repoRoot))
  */
-export function linkStateOf(manifest, meta, io = LINK_IO) {
+/**
+ * Compare one plugin's' profile devDependency spec with the spec the manager now
+ * writes. Returns null when there is nothing to repair (or when the package is
+ * not one of our devDependencies); otherwise {from, to}. This is what makes
+ * enabling a plugin rewrite a legacy absolute link: spec left behind by an
+ * older install — the migration path off absolute-path dependencies.
+ */
+export function staleDepSpec(manifest, meta) {
+  const dev = (manifest && manifest.devDependencies) || {}
+  const current = dev[meta.name]
+  if (typeof current !== 'string') return null
+  return isWorkspaceSpec(current) ? null : { from: current, to: WORKSPACE_SPEC }
+}
+
+export function depStateOf(manifest, meta, workspace, io = FS_IO) {
   const dev = (manifest && manifest.devDependencies) || {}
   const spec = dev[meta.name]
-  if (typeof spec !== 'string' || spec.trim() === '') return LINK_STATES.absent
-  const target = spec.startsWith('link:') ? spec.slice('link:'.length) : null
-  if (target === null || target.trim() === '') return LINK_STATES.mismatch
+  if (typeof spec !== 'string' || spec.trim() === '') return DEP_STATES.absent
+  if (!isWorkspaceSpec(spec)) return DEP_STATES.mismatch
   try {
-    if (!io.exists(meta.dirPath)) return LINK_STATES.unresolved
-    if (!io.exists(target)) return LINK_STATES.missing
-    return sameLinkTarget(io.realpath(target), io.realpath(meta.dirPath), io.platform)
-      ? LINK_STATES.fresh
-      : LINK_STATES.mismatch
+    if (!io.exists(meta.dirPath)) return DEP_STATES.unresolved
+    if (!workspace || workspace.ok !== true) return DEP_STATES.missing
+    return DEP_STATES.fresh
   } catch {
-    return LINK_STATES.unknown
+    return DEP_STATES.unknown
   }
 }
 
-/** Human-facing reasons a stale link cannot be repaired automatically. */
-export const RELINK_REASONS = {
-  [LINK_STATES.unresolved]: '实际目录不存在',
-  [LINK_STATES.unknown]: '无法解析路径',
+/** Human-facing reasons a stale dependency cannot be repaired automatically. */
+export const REPAIR_REASONS = {
+  [DEP_STATES.unresolved]: '实际目录不存在',
+  [DEP_STATES.unknown]: '无法解析路径',
 }
 
 /**
- * 功能作用：按面板派生状态把陈旧链接分成「可自动修」与「只能提示」两类（纯函数）——
- *           auto = 链接指向别处/目标缺失但本仓库里能唯一定位到实际目录；
+ * 功能作用：按面板派生状态把待修复依赖分成「可自动修」与「只能提示」两类（纯函数）——
+ *           auto = 规格仍不是 workspace:（如遗留 link:）或 workspace 锚点缺失，但本仓库里能唯一定位到实际目录；
  *           manual = 连实际目录都找不到（或路径解析失败），绝不猜路径。
  * 参数：
- *   derived: Array -- deriveStates() 的结果（每项带 linkState/linkDeclared/linkExpected）
+ *   derived: Array -- deriveStates() 的结果（每项带 depState/depDeclared/depExpected）
  * 返回值：
  *   { auto: Array, manual: Array, count: number, manualCount: number }
- *   例：relinkPlan(states) → { auto: [2 项], manual: [1 项], count: 2, manualCount: 1 }
+ *   例：repairPlan(states) → { auto: [2 项], manual: [1 项], count: 2, manualCount: 1 }
  * 调用样例：
- *   const plan = relinkPlan(s.derived); if (plan.count > 0) await ensureDevDeps(c, plan.auto)
+ *   const plan = repairPlan(s.derived); if (plan.count > 0) await ensureDevDeps(c, plan.auto)
  */
-export function relinkPlan(derived) {
+export function repairPlan(derived) {
   const list = Array.isArray(derived) ? derived : []
   const auto = []
   const manual = []
@@ -208,13 +303,13 @@ export function relinkPlan(derived) {
       name: p.name || p.dir,
       rowId: p.rowId,
       dirPath: p.dirPath,
-      linkState: p.linkState,
-      declared: typeof p.linkDeclared === 'string' ? p.linkDeclared : null,
-      expected: typeof p.linkExpected === 'string' ? p.linkExpected : null,
+      depState: p.depState,
+      declared: typeof p.depDeclared === 'string' ? p.depDeclared : null,
+      expected: typeof p.depExpected === 'string' ? p.depExpected : null,
     }
-    if (p.linkState === LINK_STATES.mismatch || p.linkState === LINK_STATES.missing) auto.push(entry)
-    else if (p.linkState === LINK_STATES.unresolved || p.linkState === LINK_STATES.unknown) {
-      manual.push({ ...entry, reason: RELINK_REASONS[p.linkState] || p.linkState })
+    if (p.depState === DEP_STATES.mismatch || p.depState === DEP_STATES.missing) auto.push(entry)
+    else if (p.depState === DEP_STATES.unresolved || p.depState === DEP_STATES.unknown) {
+      manual.push({ ...entry, reason: REPAIR_REASONS[p.depState] || p.depState })
     }
   }
   return { auto, manual, count: auto.length, manualCount: manual.length }
@@ -338,6 +433,14 @@ export function makeYamlEngine(jsyaml) {
     },
     dumpText(rows) {
       return rows.length > 0 ? jsyaml.dump(rows, { schema: ENTRY_LIST_SCHEMA, lineWidth: 120 }) : '[]\n'
+    },
+    /** Plain-object load (pnpm-workspace.yaml and any non-list document). */
+    loadDoc(text) {
+      const parsed = jsyaml.load(text, { schema: ENTRY_LIST_SCHEMA })
+      return (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) ? parsed : {}
+    },
+    dumpDoc(doc) {
+      return jsyaml.dump(doc, { schema: ENTRY_LIST_SCHEMA, lineWidth: 120 })
     },
   }
 }
@@ -484,7 +587,8 @@ export function stripOverrideRows(rows, ids) {
  *
  * Returns for each repo plugin: {dir,rowId,name,description,hasClient,valid,
  * error?, installed, installWhere:'dependencies'|'devDependencies'|null,
- * legacyBundle:boolean, hasRow, disabled, active, state}
+ * legacyBundle:boolean, hasRow, disabled, active, state, depState, depDeclared,
+ * depExpected}
  * state ∈ active | disabled | legacy | uninstalled | invalid
  */
 /** Raw devDependency spec of one package name (declared form), or undefined. */
@@ -493,7 +597,7 @@ function devSpecOf(manifest, name) {
   return dev[name]
 }
 
-export function deriveStates({ repoPlugins, manifest, rows, io = LINK_IO }) {
+export function deriveStates({ repoPlugins, manifest, rows, workspace, io = FS_IO }) {
   const deps = new Set(Object.keys(manifest.dependencies || {}))
   const devDeps = new Set(Object.keys(manifest.devDependencies || {}))
   const bundles = Array.isArray(manifest.dsh && manifest.dsh.profile && manifest.dsh.profile.bundles)
@@ -532,12 +636,12 @@ export function deriveStates({ repoPlugins, manifest, rows, io = LINK_IO }) {
       disabled,
       active: state === 'active' || (state === 'legacy' && !disabled),
       state,
-      // Link state is what makes "key exists" vs "points at the right place"
-      // distinguishable: 'inactive' alone cannot tell "not installed" from
-      // "installed but stale".
-      linkState: linkStateOf(manifest, p, io),
-      linkDeclared: typeof devSpecOf(manifest, p.name) === 'string' ? devSpecOf(manifest, p.name) : null,
-      linkExpected: p.valid ? linkSpecOf(p.dirPath) : null,
+      // Dependency state is what makes "key exists" vs "declared the way this
+      // repo needs" distinguishable: 'inactive' alone cannot tell "not installed"
+      // from "installed through a legacy absolute link: spec".
+      depState: depStateOf(manifest, p, workspace, io),
+      depDeclared: typeof devSpecOf(manifest, p.name) === 'string' ? devSpecOf(manifest, p.name) : null,
+      depExpected: p.valid ? WORKSPACE_SPEC : null,
     }
   })
 }
@@ -587,7 +691,7 @@ export function batchPlan(derived, enabled) {
     const state = p.state
     if (!p.valid || state === 'invalid') { skip(p, BATCH_REASONS.invalidDir); continue }
     if (state === 'legacy' || p.legacyBundle === true) { skip(p, BATCH_REASONS.legacyLayout); continue }
-    const staleLink = p.linkState === LINK_STATES.mismatch || p.linkState === LINK_STATES.missing
+    const staleLink = p.depState === DEP_STATES.mismatch || p.depState === DEP_STATES.missing
     if (open) {
       // 开启方向：动「已有行但停用」「从未安装」，外加「有激活行但链接陈旧」的项
       // （后者只修链接、把行写成 enabled，属于幂等写）；「未激活(仅依赖)」按约定
@@ -715,7 +819,18 @@ export function removePlan(derived) {
  * bundles keep only the manager, and every previously-active child is
  * represented by a canonical (non-disabled) managed row.
  */
-export function planMigration({ repoPlugins, manifest, rows, repoRoot, managerId = MANAGER_ID }) {
+/**
+ * Plan the one-click takeover of the legacy layout. Pure: returns the complete
+ * new documents + a change summary; nothing is written here.
+ *
+ * Legacy layout = local children present in profile `dependencies` and/or
+ * `dsh.profile.bundles`, or carrying an absolute-path devDependency spec.
+ * Target layout = children in `devDependencies` as plain `workspace:*` specs (no
+ * path at all), the workspace anchor (pnpm-workspace.yaml) declaring THIS repo
+ * root, bundles carrying only the manager, and every previously-active child
+ * represented by a canonical (non-disabled) managed row.
+ */
+export function planMigration({ repoPlugins, manifest, rows, repoRoot, managerId = MANAGER_ID, workspace }) {
   const deps = { ...(manifest.dependencies || {}) }
   const devDeps = { ...(manifest.devDependencies || {}) }
   const bundles = Array.isArray(manifest.dsh && manifest.dsh.profile && manifest.dsh.profile.bundles)
@@ -724,6 +839,7 @@ export function planMigration({ repoPlugins, manifest, rows, repoRoot, managerId
 
   const moved = []
   const addedDev = []
+  const relinkedDev = []
   const removedBundles = []
   const originalRowsJson = JSON.stringify(rows)
 
@@ -741,6 +857,15 @@ export function planMigration({ repoPlugins, manifest, rows, repoRoot, managerId
     const inDeps = Object.prototype.hasOwnProperty.call(deps, p.name)
     const inDevDeps = Object.prototype.hasOwnProperty.call(devDeps, p.name)
 
+    // Off-link pass, independent of the activation state: any absolute-path spec
+    // (link:/file:) becomes the workspace protocol. This is the repair an
+    // "installed on another machine" profile needs, and it never changes whether
+    // the plugin is active.
+    if (inDevDeps && !isWorkspaceSpec(devDeps[p.name])) {
+      devDeps[p.name] = WORKSPACE_SPEC
+      relinkedDev.push(p.name)
+    }
+
     // Never installed (no bundle, no dependency, no row) → leave alone.
     if (!inBundles && !inDeps && !found) continue
 
@@ -748,12 +873,12 @@ export function planMigration({ repoPlugins, manifest, rows, repoRoot, managerId
       delete deps[p.name]
       moved.push(p.name)
       if (!inDevDeps) {
-        devDeps[p.name] = linkSpecOf(p.dirPath || path.join(repoRoot, p.dir))
+        devDeps[p.name] = WORKSPACE_SPEC
         addedDev.push(p.name)
       }
     } else if (inBundles && !inDevDeps) {
-      // bundle-only legacy presence without a dependency: link it as a devDep.
-      devDeps[p.name] = linkSpecOf(p.dirPath || path.join(repoRoot, p.dir))
+      // bundle-only legacy presence without a dependency: declare it as a workspace devDep.
+      devDeps[p.name] = WORKSPACE_SPEC
       addedDev.push(p.name)
     }
     if (inBundles) {
@@ -786,6 +911,10 @@ export function planMigration({ repoPlugins, manifest, rows, repoRoot, managerId
     bundles.push(managerId)
   }
 
+  // The workspace anchor: one glob (this repo root) instead of one absolute path
+  // per plugin. A glob left over from the previous machine/location is replaced.
+  const wsNext = upsertWorkspaceGlob(workspace || {}, repoRoot)
+
   const newManifest = {
     ...manifest,
     dependencies: deps,
@@ -801,11 +930,21 @@ export function planMigration({ repoPlugins, manifest, rows, repoRoot, managerId
 
   const manifestChanged = JSON.stringify(newManifest) !== JSON.stringify(manifest)
   const rowsChanged = JSON.stringify(rows) !== originalRowsJson
-  const needsMigration = manifestChanged || rowsChanged
+  const needsMigration = manifestChanged || rowsChanged || wsNext.changed
   return {
     needsMigration,
     newManifest,
     finalRows: rows,
-    summary: { moved, addedDev, removedBundles, bundlesAfter: bundles },
+    newWorkspace: wsNext.doc,
+    workspaceChanged: wsNext.changed,
+    summary: {
+      moved,
+      addedDev,
+      relinkedDev,
+      removedBundles,
+      workspaceChanged: wsNext.changed,
+      workspaceGlob: wsNext.state.glob,
+      bundlesAfter: bundles,
+    },
   }
 }

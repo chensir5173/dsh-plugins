@@ -89,8 +89,8 @@ try {
   writeFixture()
   const plan = planOf()
   assert.deepEqual(plan.rowIds, ['aaa', 'bbb'], 'managed rows found by repo scan')
-  assert.deepEqual(plan.depNames, ['dsh-aaa'], 'only link: keys pointing into this repo are removed')
-  assert.deepEqual(plan.summary, { rows: 2, deps: 1, managerEntry: true, installs: true })
+  assert.deepEqual(plan.depNames, ['dsh-aaa', 'dsh-bbb'], 'every managed dependency key is removed, whatever its spec points at')
+  assert.deepEqual(plan.summary, { rows: 2, deps: 2, managerEntry: true, workspaceChanged: false, installs: true })
 
   // --- dry run writes nothing ------------------------------------------------
   const before = [fs.readFileSync(manifestFile, 'utf8'), fs.readFileSync(patchFile, 'utf8')]
@@ -111,8 +111,8 @@ try {
   const manifestAfter = readManifest()
   assert.equal(manifestAfter.dependencies['third-party-plugin'], '1.2.3', 'third-party dependency untouched')
   assert.equal(manifestAfter.dependencies['dsh-plugin-manager'], undefined, 'manager dependency key gone')
-  assert.equal(manifestAfter.devDependencies['dsh-aaa'], undefined, 'managed link key gone')
-  assert.equal(manifestAfter.devDependencies['dsh-bbb'], 'link:D:/elsewhere/dsh-bbb', 'a link outside this repo is left alone')
+  assert.equal(manifestAfter.devDependencies['dsh-aaa'], undefined, 'managed dependency key gone')
+  assert.equal(manifestAfter.devDependencies['dsh-bbb'], undefined, 'a managed key goes even when its legacy spec pointed outside the repo')
   assert.equal(manifestAfter.devDependencies.unrelated, 'link:D:/elsewhere/unrelated', 'unrelated link key untouched')
   assert.deepEqual(manifestAfter.dsh.profile.bundles, ['@deepseek-ai/dsh-base', 'dsh-flowglass'], 'only the manager bundle entry removed')
   assert.ok(fs.existsSync(path.join(repoRoot, 'sub-plugins', 'dsh-aaa', 'package.json')), 'source directories are never deleted')
@@ -135,6 +135,35 @@ try {
   assert.equal(mod.insideRoots('D:/Repo/sub-plugins/x', ['d:/repo'], 'win32'), true, 'win32 comparison is case-insensitive')
   assert.equal(mod.insideRoots('D:/RepoX/sub-plugins/x', ['D:/Repo'], 'win32'), false, 'prefix must be a path boundary')
   assert.equal(mod.insideRoots(path.join('C:', 'a', 'b'), ['C:/a'], 'win32'), true, 'separators are normalized')
+
+  // --- workspace:* profile (the current layout) ------------------------------
+  {
+    const wsHome = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-uninstall-ws-'))
+    const wsProfile = path.join(wsHome, 'profiles', 'web')
+    fs.mkdirSync(wsProfile, { recursive: true })
+    fs.writeFileSync(path.join(wsProfile, 'package.json'), JSON.stringify({
+      name: 'dsh-profile-web',
+      dependencies: { 'dsh-plugin-manager': 'link:' + repoRoot },
+      devDependencies: { 'dsh-aaa': 'workspace:*', 'dsh-bbb': 'workspace:*' },
+      dsh: { profile: { bundles: ['dsh-plugin-manager'] } },
+    }, null, 2))
+    const wsFile = path.join(wsProfile, 'pnpm-workspace.yaml')
+    const glob = path.join(repoRoot, 'sub-plugins', '*').split(String.fromCharCode(92)).join('/')
+    fs.writeFileSync(wsFile, JSON.stringify({ packages: ['.', glob, 'packages/*'], nodeLinker: 'hoisted' }))
+    // The profile carries js-yaml for real; a JSON-subset stub keeps this offline.
+    const wsEngine = { loadDoc: (t) => JSON.parse(t), dumpDoc: (d) => JSON.stringify(d) }
+    const plan = mod.planUninstall({ profileDir: wsProfile, repoRoot, engine: wsEngine, profile: 'web', home: wsHome })
+    assert.deepEqual(plan.depNames, ['dsh-aaa', 'dsh-bbb'], 'workspace:* keys are recognised without any path')
+    assert.equal(plan.workspaceChanged, true, 'the glob naming this repo is dropped from the anchor')
+    assert.deepEqual(plan.nextWorkspaceDoc.packages, ['.', 'packages/*'], 'other globs survive')
+    assert.equal(plan.nextWorkspaceDoc.nodeLinker, 'hoisted', 'unrelated keys are byte-identical')
+    const res = await mod.runUninstall(plan, { engine: wsEngine, pnpm: async () => ({ ok: true, code: 0 }) })
+    assert.equal(res.installed, true)
+    assert.deepEqual(JSON.parse(fs.readFileSync(wsFile, 'utf8')).packages, ['.', 'packages/*'], 'anchor rewritten on disk')
+    assert.equal(JSON.parse(fs.readFileSync(path.join(wsProfile, 'package.json'), 'utf8')).devDependencies['dsh-aaa'], undefined, 'workspace dependency key removed')
+    fs.rmSync(wsHome, { recursive: true, force: true })
+  }
+
 } finally {
   fs.rmSync(tmpRoot, { recursive: true, force: true })
 }

@@ -182,6 +182,8 @@
 
 ## A14 陈旧链接的自动检测与自愈（2026-09-22，变更 `2026-09-22-stale-link-selfheal`）
 
+> **已被 A15 取代（2026-10-09）**：本节记录的是当时的实现事实。函数已改名 `linkStateOf → depStateOf`、`relinkPlan → repairPlan`、`staleLinkSpec → staleDepSpec`，检测对象也从「`link:` 指向对不对」变成「规格是否为 `workspace:` 协议 + workspace 锚点是否放行本仓库」；`linkState/linkDeclared/linkExpected` 字段相应改为 `depState/depDeclared/depExpected`，面板按钮改叫「修复依赖」。历史记录保留，逐条现状见 A15。
+
 - [x] 自动化：`linkStateOf` 判定矩阵——无键 / 正确 / 指向别处 / 目标不存在 / 连实际目录都不存在 / 非 `link:` 写法 / IO 抛错，且**仅大小写与分隔符差异算 fresh**（host-core.test 的 stale-link 分组）。
 - [x] 自动化：`relinkPlan` 把「可自动修」与「只能提示」分开并给出计数，管理器自身不参与（同上）。
 - [x] 自动化：**单行启用修复陈旧链接**——`link:` 指向不存在目录时启用 → 恰好 1 次 manifest 写 + 恰好 1 次 `pnpm install`，`link:` 被改写为当前实际目录，响应里该插件 `linkState` 回到 `fresh`；链接已正确时不写 `package.json`、不安装（debounce.test「陈旧链接：单行启用时修复」/「链接已正确」）。
@@ -193,3 +195,19 @@
 - [ ] 需真机：把某个子插件目录临时改名（目标缺失且无法确定）→ 只出现横幅「需人工处理」，**不写文件、不安装**。
 - [ ] 需真机：设置页 `dsh-plugin-manager` 段关掉 `autoRelink` → 再制造陈旧 → 只检测与提示；打开并重启后才自动修。
 - [ ] 需真机：`fresh` 现场启动前后对比 profile `package.json` 与 `cordis.patch.yml` 的 mtime —— 应**零写入**。
+
+## A15 依赖声明去绝对路径：pnpm workspace 聚合（2026-10-09，变更 `2026-10-09-workspace-anchor`）
+
+动机（用户原话）："当前项目不要再使用 link 绝对地址的方式来管理插件了，迁移的时候容易报错"。
+做法：profile `devDependencies` 里每个受管子插件写成 `"<name>": "workspace:*"`（**不含路径**）；profile 的 `pnpm-workspace.yaml` 里由管理器维护**唯一一条**指向本仓库插件目录的 glob（`<repo>/sub-plugins/*`）。DSH 侧解析路径不变（profile `node_modules/<name>` → 仓库目录），patch 行的 name 仍是纯包名，所以设置页的标题/描述/图标照旧。管理器自身那条 `link:<repo>` 属于**安装入口**（`dsh plugin add` 写入），管理器不自行改写它——避免锚点出问题时把自己锁在外面。
+
+- [x] 自动化：`workspaceDepSpec()` 恒返回 `workspace:*`；`isWorkspaceSpec()` 认 `workspace:` 前缀（`workspace:*` 与 `workspace:^` 都算就位）。
+- [x] 自动化：`workspaceStateOf()` / `upsertWorkspaceGlob()`——空文档 `ok=false`；补 glob 后 `ok=true` 且再次调用 `changed=false`（幂等、零写入）；指向旧位置的 `<旧路径>/sub-plugins/*` 被替换，无关的 `packages/*` 与 `nodeLinker` 原样保留（host-core.test「workspace anchor」分组）。
+- [x] 自动化：`depStateOf()` 判定矩阵——无键 / `workspace:*`+锚点 / `workspace:^` / 遗留 `link:` 绝对路径 / 版本号 / `file:` / 锚点缺失 / 目录不存在 / IO 抛错（host-core.test「dependency-state detection」分组）。
+- [x] 自动化：`planMigration()` 把 `dependencies` 与遗留绝对 `link:` 规格一律改写成 `workspace:*`、补齐锚点 glob，并在锚点已就位时报 `workspaceChanged=false`（host-core.test 迁移分组）。
+- [x] 自动化：`test/uninstall.test.mjs` 新增 workspace 场景——受管依赖键按**包名**识别（不再依赖路径），卸载时摘掉 `workspace:*` 键并只移除本仓库那条 glob，其它 glob/键逐字节不变。
+- [x] 自动化：面板文案与端点改名（「依赖待修复」徽标、「修复依赖」按钮、`POST /__dsh-plugin-manager/repair`，旧 `/relink` 保留为别名）并改读 `repairPlan`（bundle.test「stale deps…」）。
+- [x] 端到端实测（隔离 `DSH_HOME`、pnpm 用桩、**未触碰运行中的 web profile**）：profile 里放两条 `link:`（一条指向当前目录、一条指向 `D:/old/machine/...`）+ `pnpm-workspace.yaml` 只有 `packages: ["."]` → 宿主启动自检把两条都改写成 `workspace:*`、锚点补上 `C:/…/dsh-plugins/sub-plugins/*`（`nodeLinker`/`autoInstallPeers` 原样保留）、只跑一次 install；`/list` 两条都 `fresh`、`repairPlan.count=0`；`/repair` 幂等 noop；`/migrate` 把 bundles 收敛成只剩管理器并写激活行。
+- [x] 迁移可行性实测（真实 pnpm 11.23 + 临时 profile）：`pnpm-workspace.yaml` 放行 `<repo>/sub-plugins/*` + 依赖写 `workspace:*` → `pnpm install` 成功（`Scope: all 11 workspace projects`），`node_modules/<name>` 与仓库目录**同 inode**（Windows junction），写文件到仓库侧立刻透过 `node_modules` 可见，`createRequire` 能解析 `package.json` / `.` / `./client`。仓库目录改名后 install 报 `ERR_PNPM_WORKSPACE_PKG_NOT_FOUND`，改回即恢复 —— 正是启动自检要覆盖的场景。
+- [x] 回归：`host-core.test.mjs`、`bundle.test.mjs`、`uninstall.test.mjs`、`entry-config.test.mjs`、`root-install-shell.test.mjs` 全绿；`debounce.test.mjs` / `batch-remove-all.test.mjs` 因本机 `symlink EPERM` 无法跑（既有环境性红，与本次改动无关）。
+- [ ] 需真机：在真实 web profile 上重启一次 → 面板横幅为 0、`/status` 的 `workspace.ok === true`、profile `package.json` 的 `devDependencies` 里不再有任何子插件的 `link:` 绝对路径。

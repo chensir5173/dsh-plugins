@@ -8,13 +8,18 @@
 //   POST /__dsh-plugin-manager/set-enabled  {dir, enabled}  — activate/disable
 //   POST /__dsh-plugin-manager/remove        {dir}          — remove (row + devDep)
 //   POST /__dsh-plugin-manager/migrate       {}             — one-click takeover
+//   POST /__dsh-plugin-manager/repair        {}             — repair stale deps (alias: /relink)
 //
 // Activation model (design.md): the manager is the ONLY local bundle in the
-// profile (`dsh.profile.bundles`); each managed dsh-* sibling stays resolvable
-// as a profile devDependency (link:) and gets a canonical stable-id insert row
-// in the profile cordis.patch.yml. That file is live-watched by DSH's patch HMR
-// (patchReload:'live'), so host-side rows start/stop immediately; client-side
-// UI needs one page reload (the panel tells the user, never auto-reloads).
+// profile (`dsh.profile.bundles`); each managed dsh-* sibling is a profile
+// devDependency written as the plain `workspace:*` spec (NEVER an absolute
+// path) and gets a canonical stable-id insert row in profile cordis.patch.yml.
+// The ONE path that remains — the plugin-root glob in <profile>/pnpm-workspace.yaml
+// — is maintained by this host, so a repo that moved folder or machine repairs
+// itself on the next start instead of failing with ERR_PNPM_WORKSPACE_PKG_NOT_FOUND.
+// That patch file is live-watched by DSH's patch HMR (patchReload:'live'), so
+// host-side rows start/stop immediately; client-side UI needs one page reload
+// (the panel tells the user, never auto-reloads).
 //
 // Profile discovery: ctx.baseUrl is the profile directory file:URL (anchored on
 // dirname(<profile>/cordis.yml) by the boot loader), so this host never needs
@@ -41,6 +46,8 @@ import {
   INTENT_DEBOUNCE_MS,
   YAML_PKG,
   YAML_PKG_RANGE,
+  WORKSPACE_FILE,
+  WORKSPACE_SPEC,
   applyIntents,
   upsertManagedMany,
   batchPlan,
@@ -60,9 +67,12 @@ import {
   removeManaged,
   deriveStates,
   planMigration,
-  linkSpecOf,
-  staleLinkSpec,
-  relinkPlan,
+  isWorkspaceSpec,
+  pluginsGlobOf,
+  repairPlan,
+  staleDepSpec,
+  upsertWorkspaceGlob,
+  workspaceStateOf,
   pluginRootsOf,
 } from './host-core.js'
 
@@ -92,8 +102,12 @@ export const HOST_DIAG = {
   autoRelink: null,
   /** Last relink (auto or panel) outcome. */
   lastRelink: null,
-  /** Whether the automatic relink switch is on. */
+  /** Whether the automatic dependency-repair switch is on. */
   autoRelinkEnabled: true,
+  /** Workspace anchor (pnpm-workspace.yaml) view: { file, glob, ok, staleGlobs }. */
+  workspace: null,
+  /** Last automatic workspace-glob repair (null until one happens). */
+  workspaceRepair: null,
 }
 
 // --- settings: the automatic relink switch (optional capability) -------------
@@ -328,6 +342,7 @@ function resolveContext(config, baseUrl) {
     profileDir,
     patchFile: patchPathOf(home, profileName),
     manifestFile: manifestPathOf(home, profileName),
+    workspaceFile: path.join(profileDir, WORKSPACE_FILE),
     repoRoot: REPO_ROOT,
     pluginsRoot: PLUGINS_ROOT,
   }
@@ -359,6 +374,66 @@ async function ensureYaml(profileDir) {
 
 function readPlugins(repoRoot) {
   return listRepoPluginDirs(repoRoot).map((dir) => readPluginMeta(repoRoot, dir))
+}
+
+// --- workspace anchor (pnpm-workspace.yaml) ---------------------------------
+//
+// Managed siblings are declared as plain `workspace:*` devDependencies; the ONLY
+// place that still knows where this repository lives is the workspace anchor — one
+// glob entry in <profile>/pnpm-workspace.yaml. Keeping that anchor correct here
+// (idempotent, writing only when something actually has to change) is what lets a
+// profile survive a repo that was moved, renamed or cloned on another machine: the
+// next start replaces the old glob instead of failing with
+// ERR_PNPM_WORKSPACE_PKG_NOT_FOUND. Unrelated globs (packages/*, apps/*) are kept.
+
+/** Read the profile's pnpm-workspace.yaml (missing/unreadable → empty document). */
+function readWorkspaceDoc(c) {
+  const probe = requireProfileYaml(c.profileDir)
+  if (!probe.jsyaml) return { doc: {}, engine: null, error: probe.error }
+  const engine = makeYamlEngine(probe.jsyaml)
+  let text = ''
+  try {
+    if (fs.existsSync(c.workspaceFile)) text = fs.readFileSync(c.workspaceFile, 'utf8')
+  } catch { text = '' }
+  if (text.trim() === '') return { doc: {}, engine, error: null }
+  try {
+    return { doc: engine.loadDoc(text), engine, error: null }
+  } catch (e) {
+    return { doc: {}, engine, error: WORKSPACE_FILE + ' 解析失败：' + ((e && e.message) || e) }
+  }
+}
+
+/** Anchor snapshot: parsed document + evaluated state (no writes). */
+function workspaceSnapshot(c) {
+  const read = readWorkspaceDoc(c)
+  const state = workspaceStateOf(read.doc, c.repoRoot)
+  return { doc: read.doc, engine: read.engine, error: read.error, state }
+}
+
+/**
+ * 功能作用：确保 profile 的 pnpm-workspace.yaml 放行本仓库插件目录——幂等，已就绪时零写入；
+ *           需要补写或替换旧位置 glob 时先备份再整体重写（YAML 注释不会保留，故只在必要时写）。
+ * 参数：c: object -- resolveContext() 的结果（用到 workspaceFile / profileDir / repoRoot）
+ * 返回值：{ changed, error, glob, backup, staleGlobs }
+ */
+function ensureWorkspaceGlob(c) {
+  const snap = workspaceSnapshot(c)
+  const glob = snap.state.glob
+  if (!snap.engine) return { changed: false, error: snap.error, glob, backup: null, staleGlobs: snap.state.staleGlobs }
+  const next = upsertWorkspaceGlob(snap.doc, c.repoRoot)
+  HOST_DIAG.workspace = { file: c.workspaceFile, glob, ok: next.state.ok, staleGlobs: next.state.staleGlobs }
+  if (!next.changed) return { changed: false, error: null, glob, backup: null, staleGlobs: next.state.staleGlobs }
+  let backup = null
+  try { if (fs.existsSync(c.workspaceFile)) backup = backupFile(c.workspaceFile) } catch { backup = null }
+  try {
+    fs.mkdirSync(path.dirname(c.workspaceFile), { recursive: true })
+    fs.writeFileSync(c.workspaceFile, snap.engine.dumpDoc(next.doc), 'utf8')
+  } catch (e) {
+    return { changed: false, error: `写入 ${WORKSPACE_FILE} 失败：${(e && e.message) || e}`, glob, backup, staleGlobs: snap.state.staleGlobs }
+  }
+  HOST_DIAG.workspaceRepair = { at: Date.now(), glob, replaced: next.state.staleGlobs, backup }
+  HOST_DIAG.workspace = { file: c.workspaceFile, glob, ok: true, staleGlobs: [] }
+  return { changed: true, error: null, glob, backup, staleGlobs: next.state.staleGlobs }
 }
 
 // --- pending switch intents (debounced patch writes) -------------------------
@@ -458,9 +533,10 @@ function snapshot(ctx, config, extraIntents) {
   // Queued intents are what the user asked for: report them as the current
   // state (the flush makes them durable a few hundred ms later).
   const intents = Array.isArray(extraIntents) ? extraIntents : pendingIntents
-  const derived = deriveStates({ repoPlugins: plugins, manifest, rows: applyIntents(rows, intents) })
+  const wsSnap = workspaceSnapshot(c)
+  const derived = deriveStates({ repoPlugins: plugins, manifest, rows: applyIntents(rows, intents), workspace: wsSnap.state })
   const legacyDetected = derived.some((p) => p.legacyBundle)
-  return { c, manifest, rows, plugins, derived, legacyDetected, yamlError: yaml.error }
+  return { c, manifest, rows, plugins, derived, legacyDetected, yamlError: yaml.error, workspace: wsSnap }
 }
 
 /**
@@ -545,12 +621,23 @@ function listPayload(s) {
       yamlError: s.yamlError,
       plugins: s.derived,
       batchCounts: batchCountsOf(s.derived),
-      // Stale-link self-heal face: what the panel banner renders and what the
-      //「重定位」按钮 posts back.
-      linkPlan: (() => {
-        const plan = relinkPlan(s.derived)
+      // Dependency-repair face: what the panel banner renders and what the
+      //「修复依赖」按钮 posts back. auto = repairable (legacy link: spec or a
+      // missing workspace glob); manual = the plugin directory itself is gone.
+      repairPlan: (() => {
+        const plan = repairPlan(s.derived)
         return { count: plan.count, manualCount: plan.manualCount, auto: plan.auto, manual: plan.manual }
       })(),
+      // The workspace anchor this profile relies on (one glob, no per-plugin path).
+      workspace: s.workspace ? {
+        file: s.workspace.state.file,
+        path: s.c.workspaceFile,
+        glob: s.workspace.state.glob,
+        ok: s.workspace.state.ok,
+        packages: s.workspace.state.packages,
+        staleGlobs: s.workspace.state.staleGlobs,
+        error: s.workspace.error || null,
+      } : null,
       autoRelink: HOST_DIAG.autoRelink,
       autoRelinkEnabled: __autoRelink === true,
       // Self-uninstall face: the command the panel offers to copy (never executed
@@ -565,45 +652,55 @@ function listPayload(s) {
 
 // --- actions -----------------------------------------------------------------
 
-async function ensureDevDep(c, pkgName, absDir) {
+async function ensureDevDep(c, pkgName) {
   const manifest = readManifest(c.manifestFile)
   const inDeps = Object.prototype.hasOwnProperty.call(manifest.dependencies || {}, pkgName)
-  const inDev = Object.prototype.hasOwnProperty.call(manifest.devDependencies || {}, pkgName)
-  const spec = linkSpecOf(absDir)
-  // Already linked to the right directory → nothing to do. A devDep pointing
-  // elsewhere (e.g. the pre-move flat path after dirs moved into sub-plugins/)
-  // is repaired below instead of being trusted.
-  const stale = inDev ? staleLinkSpec(manifest, { name: pkgName, dirPath: absDir }) : null
-  if (inDev && !stale) return { installed: true, ranPnpm: false, error: null }
+  const spec = (manifest.devDependencies || {})[pkgName]
+  // 就位 = profile 用的是 workspace 协议 且 锚点已放行本仓库：只要还有遗留的 link: 绝对路径规格，
+  // 就改写它（这就是老 profile 从「路径」迁到「workspace 协议」的那一步）。
+  const ready = !inDeps && isWorkspaceSpec(spec)
+  const ws = ensureWorkspaceGlob(c)
+  if (ws.error) return { installed: false, ranPnpm: false, error: ws.error, glob: ws.glob }
+  if (ready && !ws.changed) return { installed: true, ranPnpm: false, error: null, glob: ws.glob }
   const backup = backupFile(c.manifestFile)
   const manifest2 = { ...manifest }
   manifest2.dependencies = { ...(manifest.dependencies || {}) }
   delete manifest2.dependencies[pkgName]
-  manifest2.devDependencies = { ...(manifest.devDependencies || {}), [pkgName]: spec }
+  manifest2.devDependencies = { ...(manifest.devDependencies || {}), [pkgName]: WORKSPACE_SPEC }
   writeJsonPretty(c.manifestFile, manifest2)
   const res = await pnpmRunner(c.profileDir, ['install'])
   if (!res.ok) {
     try { fs.copyFileSync(backup, c.manifestFile) } catch { /* best effort */ }
     return { installed: false, ranPnpm: true, error: res.error || 'pnpm install failed' }
   }
-  return { installed: true, ranPnpm: true, error: null, backup }
+  return { installed: true, ranPnpm: true, error: null, backup, glob: ws.glob, workspaceChanged: ws.changed }
 }
-
 /**
- * 功能作用：批量确保多个子插件可解析——把所有缺失/陈旧的 link: devDependency 一次性写进 profile package.json，
+ * 功能作用：批量确保多个子插件可解析——先把 workspace 锚点（pnpm-workspace.yaml 的插件目录 glob）
+ *           补齐/修正到位，再把缺失或仍是遗留绝对路径规格的 devDependency 一次性写成 workspace:*，
  *           然后只执行一次 pnpm install（批量开启时用；逐项安装会 N 次改写 + N 次安装，慢且没必要）。
  * 参数：
- *   c: object -- resolveContext() 的结果（用到 manifestFile / profileDir）
- *   entries: Array -- [{ name, dirPath }]，例如 [{ name: 'dsh-esc-rewind', dirPath: 'C:/repo/sub-plugins/dsh-esc-rewind' }]
+ *   c: object -- resolveContext() 的结果（用到 manifestFile / profileDir / repoRoot / workspaceFile）
+ *   entries: Array -- [{ name }]，例如 [{ name: 'dsh-esc-rewind' }]
  * 返回值：
- *   { installed: string[], failed: [{ name, error }], ranPnpm: boolean, backup: string|null }
- *   例：{ installed: ['dsh-aaa'], failed: [], ranPnpm: true, backup: '.../package.json.bak-...' }
+ *   { installed: string[], failed: [{ name, error }], ranPnpm: boolean, backup: string|null, workspaceChanged: boolean }
+ *   例：{ installed: ['dsh-aaa'], failed: [], ranPnpm: true, backup: '.../package.json.bak-...', workspaceChanged: true }
  * 调用样例：
- *   const ins = await ensureDevDeps(c, needInstall.map((t) => ({ name: t.name, dirPath: t.dirPath })))
+ *   const ins = await ensureDevDeps(c, needInstall.map((t) => ({ name: t.name })))
  */
 async function ensureDevDeps(c, entries) {
-  const wanted = (Array.isArray(entries) ? entries : []).filter((e) => e && e.name && e.dirPath)
-  if (wanted.length === 0) return { installed: [], failed: [], ranPnpm: false, backup: null }
+  const wanted = (Array.isArray(entries) ? entries : []).filter((e) => e && e.name)
+  const ws = ensureWorkspaceGlob(c)
+  if (ws.error) {
+    return { installed: [], failed: wanted.map((e) => ({ name: e.name, error: ws.error })), ranPnpm: false, backup: null, workspaceChanged: false }
+  }
+  if (wanted.length === 0 && !ws.changed) return { installed: [], failed: [], ranPnpm: false, backup: null, workspaceChanged: false }
+  if (wanted.length === 0) {
+    // 锚点刚被修好，即使没有目标包也要跑一次，让 pnpm 按新 glob 重建解析。
+    const res = await pnpmRunner(c.profileDir, ['install'])
+    const failed = res.ok ? [] : [{ name: WORKSPACE_FILE, error: res.error || 'pnpm install failed' }]
+    return { installed: [], failed, ranPnpm: true, backup: null, workspaceChanged: true }
+  }
 
   const manifest = readManifest(c.manifestFile)
   const next = { ...manifest }
@@ -611,28 +708,27 @@ async function ensureDevDeps(c, entries) {
   next.devDependencies = { ...(manifest.devDependencies || {}) }
   const changed = []
   for (const e of wanted) {
-    const spec = linkSpecOf(e.dirPath)
-    const alreadyLinked = next.devDependencies[e.name] === spec
+    const already = isWorkspaceSpec(next.devDependencies[e.name])
       && !Object.prototype.hasOwnProperty.call(next.dependencies, e.name)
-    if (alreadyLinked) continue
+    if (already) continue
     delete next.dependencies[e.name]
-    next.devDependencies[e.name] = spec
+    next.devDependencies[e.name] = WORKSPACE_SPEC
     changed.push(e.name)
   }
-  // 每个 link: 都已指对目录 → 无需改写也无需安装，直接视为可解析。
-  if (changed.length === 0) {
-    return { installed: wanted.map((e) => e.name), failed: [], ranPnpm: false, backup: null }
+  // 依赖键都已就位、锚点也没动过 → 无需改写也无需安装，直接视为可解析。
+  if (changed.length === 0 && !ws.changed) {
+    return { installed: wanted.map((e) => e.name), failed: [], ranPnpm: false, backup: null, workspaceChanged: false }
   }
 
   const backup = backupFile(c.manifestFile)
-  writeJsonPretty(c.manifestFile, next)
+  if (changed.length > 0) writeJsonPretty(c.manifestFile, next)
   const res = await pnpmRunner(c.profileDir, ['install'])
   if (!res.ok) {
     try { fs.copyFileSync(backup, c.manifestFile) } catch { /* best effort */ }
     const error = res.error || 'pnpm install failed'
-    return { installed: [], failed: wanted.map((e) => ({ name: e.name, error })), ranPnpm: true, backup }
+    return { installed: [], failed: wanted.map((e) => ({ name: e.name, error })), ranPnpm: true, backup, workspaceChanged: ws.changed }
   }
-  return { installed: wanted.map((e) => e.name), failed: [], ranPnpm: true, backup }
+  return { installed: wanted.map((e) => e.name), failed: [], ranPnpm: true, backup, workspaceChanged: ws.changed }
 }
 
 async function dropDevDep(c, pkgName) {
@@ -723,6 +819,8 @@ function registerHttp(ctx, host, config) {
           autoRelinkEnabled: __autoRelink === true,
           autoRelink: HOST_DIAG.autoRelink,
           lastRelink: HOST_DIAG.lastRelink,
+          workspace: HOST_DIAG.workspace,
+          workspaceRepair: HOST_DIAG.workspaceRepair,
         })
         return
       }
@@ -732,7 +830,7 @@ function registerHttp(ctx, host, config) {
         return
       }
 
-      if ((url === `${HTTP_PREFIX}/set-enabled` || url === `${HTTP_PREFIX}/remove` || url === `${HTTP_PREFIX}/migrate` || url === `${HTTP_PREFIX}/set-all-enabled` || url === `${HTTP_PREFIX}/remove-all` || url === `${HTTP_PREFIX}/relink`) && method === 'POST') {
+      if ((url === `${HTTP_PREFIX}/set-enabled` || url === `${HTTP_PREFIX}/remove` || url === `${HTTP_PREFIX}/migrate` || url === `${HTTP_PREFIX}/set-all-enabled` || url === `${HTTP_PREFIX}/remove-all` || url === `${HTTP_PREFIX}/relink` || url === `${HTTP_PREFIX}/repair`) && method === 'POST') {
         let args = {}
         const body = await readBody(req)
         if (body) {
@@ -990,11 +1088,12 @@ function registerHttp(ctx, host, config) {
               const check = readManifest(c.manifestFile)
               const inDeps = Object.prototype.hasOwnProperty.call(check.dependencies || {}, meta.name)
               const devSpec = (check.devDependencies || {})[meta.name]
-              // 键在 ≠ 指向对：devDependency 存在但 link: 陈旧时同样要改写
-              // （规格场景「陈旧链接在启用时被修复」；只有已正确才跳过安装）。
-              const stale = staleLinkSpec(check, { name: meta.name, dirPath: meta.dirPath })
-              if (!inDeps && (typeof devSpec !== 'string' || stale !== null)) {
-                const ins = await ensureDevDep(c, meta.name, meta.dirPath)
+              const anchorOk = Boolean(s.workspace && s.workspace.state && s.workspace.state.ok === true)
+              // 键在 ≠ 就位：规格仍是遗留 link:、或 workspace 锚点缺失时同样要修；
+              // 只有「workspace 协议 + 锚点就绪」才跳过安装。
+              const ready = !inDeps && isWorkspaceSpec(devSpec) && anchorOk
+              if (!ready) {
+                const ins = await ensureDevDep(c, meta.name)
                 if (!ins.installed) {
                   sendJson(res, 500, { ok: false, error: `install ${meta.name} failed: ${ins.error || 'unknown'}` })
                   return
@@ -1031,9 +1130,9 @@ function registerHttp(ctx, host, config) {
           return
         }
 
-        if (url === `${HTTP_PREFIX}/relink`) {
+        if (url === `${HTTP_PREFIX}/repair` || url === `${HTTP_PREFIX}/relink`) {
           const s0 = snapshot(ctx, __cfg)
-          const plan = relinkPlan(s0.derived)
+          const plan = repairPlan(s0.derived)
           const wanted = Array.isArray(args.dirs) && args.dirs.length > 0
             ? plan.auto.filter((p) => args.dirs.includes(p.dir))
             : plan.auto
@@ -1073,6 +1172,7 @@ function registerHttp(ctx, host, config) {
           manifest: s.manifest,
           rows: s.rows,
           repoRoot: c.repoRoot,
+          workspace: s.workspace ? s.workspace.doc : {},
         })
         if (!plan.needsMigration) {
           sendJson(res, 200, { ok: true, noop: true, data: { ...listPayload(snapshot(ctx, __cfg)).data } })
@@ -1080,7 +1180,12 @@ function registerHttp(ctx, host, config) {
         }
         const bakManifest = fs.existsSync(c.manifestFile) ? backupFile(c.manifestFile) : null
         const bakPatch = fs.existsSync(c.patchFile) ? backupFile(c.patchFile) : null
+        const bakWorkspace = plan.workspaceChanged && fs.existsSync(c.workspaceFile) ? backupFile(c.workspaceFile) : null
         try {
+          if (plan.workspaceChanged) {
+            fs.mkdirSync(path.dirname(c.workspaceFile), { recursive: true })
+            fs.writeFileSync(c.workspaceFile, y.engine.dumpDoc(plan.newWorkspace || {}), 'utf8')
+          }
           writeJsonPretty(c.manifestFile, plan.newManifest)
           writePatchRows(y.engine, c.patchFile, plan.finalRows)
           const resPnpm = await pnpmRunner(c.profileDir, ['install'])
@@ -1089,13 +1194,14 @@ function registerHttp(ctx, host, config) {
           }
           sendJson(res, 200, {
             ok: true,
-            backups: [bakManifest, bakPatch].filter(Boolean),
+            backups: [bakManifest, bakPatch, bakWorkspace].filter(Boolean),
             summary: plan.summary,
             data: { ...listPayload(snapshot(ctx, __cfg)).data },
           })
         } catch (e) {
           if (bakManifest) { try { fs.copyFileSync(bakManifest, c.manifestFile) } catch { /* best effort */ } }
           if (bakPatch) { try { fs.copyFileSync(bakPatch, c.patchFile) } catch { /* best effort */ } }
+          if (bakWorkspace) { try { fs.copyFileSync(bakWorkspace, c.workspaceFile) } catch { /* best effort */ } }
           sendJson(res, 500, { ok: false, error: (e && e.message) || String(e) })
         }
         return
@@ -1123,9 +1229,9 @@ function registerHttp(ctx, host, config) {
 }
 
 /**
- * 功能作用：宿主启动后的一次性自检——检测陈旧链接，对「可确定」的那些自动改写并只跑一次
- *           pnpm install；每次宿主启动最多执行一次（失败也消耗额度，避免坏环境反复写）。
- *           开关关闭时只记录"已跳过"，不做任何写入。
+ * 功能作用：宿主启动后的一次性自检——检测待修依赖（遗留 link: 绝对路径规格、或 workspace 锚点缺失/
+ *           指向旧位置），对「可确定」的那些自动改写并只跑一次 pnpm install；每次宿主启动最多执行
+ *           一次（失败也消耗额度，避免坏环境反复写）。开关关闭时只记录"已跳过"，不做任何写入。
  * 参数：
  *   ctx: object -- cordis 上下文（供快照解析 profile）
  *   cfg: object -- 插件配置（profile 覆盖等），例 {}
@@ -1143,9 +1249,11 @@ async function autoRelinkOnce(ctx, cfg) {
   }
   try {
     const s = snapshot(ctx, cfg)
-    const plan = relinkPlan(s.derived)
-    if (plan.count === 0) {
-      HOST_DIAG.autoRelink = { at: Date.now(), relinked: [], ranPnpm: false, manualCount: plan.manualCount }
+    const plan = repairPlan(s.derived)
+    const anchorOk = Boolean(s.workspace && s.workspace.state && s.workspace.state.ok === true)
+    // 无事可做 = 没有待修依赖 且 workspace 锚点已就位；锚点缺失本身也要修一次（迁移后自愈）。
+    if (plan.count === 0 && anchorOk) {
+      HOST_DIAG.autoRelink = { at: Date.now(), relinked: [], ranPnpm: false, manualCount: plan.manualCount, workspaceOk: true }
       return
     }
     const ins = await ensureDevDeps(s.c, plan.auto.map((p) => ({ name: p.name, dirPath: p.dirPath })))
@@ -1155,6 +1263,7 @@ async function autoRelinkOnce(ctx, cfg) {
       failed: ins.failed,
       ranPnpm: ins.ranPnpm,
       manualCount: plan.manualCount,
+      workspaceChanged: ins.workspaceChanged === true,
     }
     HOST_DIAG.lastRelink = { ...HOST_DIAG.autoRelink, source: 'auto' }
   } catch (error) {
@@ -1168,6 +1277,8 @@ function apply(ctx, config = {}) {
   const c0 = resolveContext(config, ctx && ctx.baseUrl)
   HOST_DIAG.profileName = c0.profileName
   HOST_DIAG.repoRoot = c0.repoRoot
+  const ws0 = workspaceSnapshot(c0)
+  HOST_DIAG.workspace = { file: c0.workspaceFile, glob: ws0.state.glob, ok: ws0.state.ok, staleGlobs: ws0.state.staleGlobs }
   // 0.2.0：条目 Config 里的开关值（0.1.x 的行没有 config，此分支不生效，仍走 installSection）。
   if (config && typeof config[AUTO_RELINK_FIELD] === 'boolean') {
     __autoRelink = config[AUTO_RELINK_FIELD] !== false
