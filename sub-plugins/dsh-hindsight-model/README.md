@@ -1,4 +1,17 @@
 # dsh-hindsight-model
+> ## ⛔ 已退役（2026-10-09）——暂时废弃，源码留作参考
+>
+> 用户要求**暂时废弃**这个子插件。它管的是 Hindsight（Vectorize 的长期记忆层）那个**独立 Python 守护进程**的模型配置与启停——进程、凭据、模型语义三样都和 DSH 隔离，本仓不再跟着维护它。
+>
+> 因此：
+> - **管理器面板不再列出它** —— `dsh-plugin-manager/src/host-core.js` 的 `RETIRED_PLUGIN_DIRS` 里登记了 `dsh-hindsight-model`，扫描直接跳过（`dsh-plugin-manager/test/root-install-shell.test.mjs` 有一条断言钉住「源码在、面板不列」）。
+> - **desktop profile 里那一行已置 `disabled: true`**（保留激活行与依赖，只关掉）—— 会话开始时的 `/health` 探测与守护进程按需自动拉起随之停止。
+> - **源码、本文档、`ACCEPTANCE.md` 与测试全部保留**，作为「外部 Python 守护进程的配置面板 + 环境净化启停」的参考实现（`node test/bundle.test.mjs` 仍可跑）。
+> - **恢复**：把 `dsh-hindsight-model` 从 `RETIRED_PLUGIN_DIRS` 里删掉，并去掉 profile `cordis.patch.yml` 里 `hindsight-model` 行的 `disabled: true`。
+> - 退役背景与恢复步骤：[`docs/knowledge/2026-10-09-retire-hindsight-model.md`](../../docs/knowledge/2026-10-09-retire-hindsight-model.md)。
+>
+> 下面保留的是退役前的原始说明，**只作历史参考**。
+
 
 DSH **设置 → 本地插件 → 「Hindsight 模型」**（「本地插件」一级入口里的一个 tab）面板：**看穿四层取值**、**改得动权威文件**、**答得出「到底生效了没有」**。
 

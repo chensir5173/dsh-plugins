@@ -26,7 +26,7 @@ dsh plugin --profile web add <本机仓库根>                                  
 | [`dsh-session-title-regenerate`](../sub-plugins/dsh-session-title-regenerate/README.md) | 用**当前模型**摘要本会话全部提问，重生成 ≤60 字标题；**思考开关 / 推理强度 / 输出上限**可在设置页调（默认关思考、512） | 会话头按钮 / 侧栏行 `⋯` 菜单 / `/regenerate-title` / 设置 →「本地插件」tab | 客户端 + 宿主命令 | 核心 ≥ 0.1.1-rc.2 |
 | [`dsh-session-time-bucket`](../sub-plugins/dsh-session-time-bucket/README.md) | 侧栏会话列表按**今天/昨天/前7天/前30天/更早**分组 | 自动：核心处于「单列表 + 最近更新」时接管观感 | 纯客户端 | 无需操作；切到按工作区/手动排序或搜索时自动退出 |
 | ~~[`dsh-open-session-workdir`](../sub-plugins/dsh-open-session-workdir/README.md)~~ **已退役** | ~~一键用**系统文件管理器**打开当前会话的工作目录~~ —— 核心已自带「Open In…」分体按钮（探测已装应用 + 记住上次选择） | 不再出现在管理器面板；源码保留在仓库 | — | 退役中：管理器扫描跳过它（`RETIRED_PLUGIN_DIRS`），无法再激活 |
-| [`dsh-hindsight-model`](../sub-plugins/dsh-hindsight-model/README.md) | 看清 **Hindsight 守护进程**当前跑的是哪个模型、改掉它，**启停它**，并按需自动拉起 —— 四层对照（落盘 / 进程实际生效 / 外层冲突源 / 生效判据） | 设置 → **Hindsight 模型** | 宿主 + 客户端 | 需 `webServer` 与 `~/.hindsight/coding-agent.json`；缺失时只禁用对应区块，其余照常 |
+| ~~[`dsh-hindsight-model`](../sub-plugins/dsh-hindsight-model/README.md)~~ **已退役** | ~~看清 **Hindsight 守护进程**当前跑的是哪个模型、改掉它，**启停它**，并按需自动拉起 —— 四层对照（落盘 / 进程实际生效 / 外层冲突源 / 生效判据）~~ —— 用户 2026-10-09 要求暂时废弃 | 不再出现在管理器面板；源码保留在仓库 | — | 退役中：管理器扫描跳过它（`RETIRED_PLUGIN_DIRS`），无法再激活 |
 | [`dsh-idle-hook`](../sub-plugins/dsh-idle-hook/README.md) | 模型不在运行时（一轮结束 / 等待批准 / 等待回答）按规则执行**本机脚本**（py/bat/ps1/sh/可执行），把通知送到页面关掉也能到的地方 | 设置 → **空闲通知** | 宿主 + 客户端 | 需 `settings` 服务读规则与 `webServer` 提供设置页/心跳；二者缺席时降级为「无规则不触发」，宿主半照常加载 |
 | [`dsh-agent-preset-manager`](../sub-plugins/dsh-agent-preset-manager/README.md) | 让**本地目录里的 agent preset** 在 0.2.0 上继续可用：运行期声明进宿主注册表，可开关 / 新增 / 编辑 / 删除 / 导入 / 迁移 | 设置 → **本地插件** → tab「Agent 预设」 | 宿主 + 客户端 | 需宿主提供 `agentPresets` 注册表服务（缺席即只读）；不碰 profile 配置 |
 | [`dsh-terminal-font`](../sub-plugins/dsh-terminal-font/README.md) | 把本机已装的 **Nerd Font** 接进侧边栏终端字体栈（`@font-face` + `size-adjust` 归一），修掉 oh-my-posh 提示符的豆腐块 | 自动：样式进页面 `<head>`；设置 →「本地插件」→ tab「终端字体」看诊断 / 改字体 | 客户端 + 空壳宿主（注入样式） | 本机需装 `0xProto Nerd Font (Mono)` 与 `Sarasa Term SC Nerd`；**桌面版须重启 DSH Desktop** |
@@ -113,6 +113,8 @@ dsh plugin --profile web add <本机仓库根>                                  
 
 ### dsh-hindsight-model — Hindsight 模型面板
 
+> **⛔ 已退役（2026-10-09）**：管理器面板不再列出它（`RETIRED_PLUGIN_DIRS`），desktop profile 里那一行已置 `disabled: true` ⇒ 面板与守护进程按需自动拉起都停了。源码与下面这节说明**原样保留**作参考；原因与恢复步骤见 [`knowledge/2026-10-09-retire-hindsight-model.md`](knowledge/2026-10-09-retire-hindsight-model.md)。
+
 - **在哪**：设置页 →「Hindsight 模型」（夹在「本地插件」与「MCP」之间）。它是一个**诊断优先**的面板，不是一组开关。
 - **四层是什么意思**：① `~/.hindsight/profiles/<profile>.env` 落盘值 ② 守护进程启动日志里它**真正读到**的 provider/model/endpoint ③ 会覆盖 ① 的外层值，**分两组**（用户级环境变量 / 宿主进程环境变量）④ 生效判据 = ①② 的三件套是否一致。
 - **⚠️ 为什么 ③ 要分两组**：**用户级**（`HKCU\Environment`）本插件能一键清理（先导出备份）；**宿主进程**那层**清不掉**——它来自你启动 `dsh web` 的上层环境，面板只如实显示并保证自己给的重启命令做了净化。
@@ -158,11 +160,13 @@ dsh plugin --profile web add <本机仓库根>                                  
 | composer 右侧组 `conversation.input.right` | `dsh-composer-provider-label`（10，紧邻核心模型选择器左侧） |
 | 会话头操作区 `conversation.session.header.actions` | `dsh-session-title-regenerate`（27）· `dsh-esc-rewind` 处置开关（28）；核心自身另有 日程(10)/任务(20)/删除(30)。~~`dsh-open-session-workdir`（25）~~ 已于 2026-09-18 退役 |
 | 设置页 `settings.section` | `dsh-plugin-manager`「本地插件」（16）——本仓**唯一**的一条导航行，其余插件不再各占一行 |
-| 「本地插件」页内的 tab `settings.localPlugins.tab` | `dsh-plugin-manager`（`plugins` 0）· `dsh-agent-preset-manager`「Agent 预设」（`agent-presets` 20）· `dsh-hindsight-model`（`hindsight-model` 30）· `dsh-idle-hook`（`idle-hook` 40）· `dsh-esc-rewind`「子代理」（`subagents` 50） |
+| 「本地插件」页内的 tab `settings.localPlugins.tab` | `dsh-plugin-manager`（`plugins` 0）· `dsh-agent-preset-manager`「Agent 预设」（`agent-presets` 20）· `dsh-idle-hook`（`idle-hook` 40）· `dsh-esc-rewind`「子代理」（`subagents` 50） |
 | 斜杠命令 | `/rewind`（客户端 `commandUi` 贡献）· `/regenerate-title`（宿主命令） |
 | 侧栏会话行 `⋯` 菜单 | `dsh-session-title-regenerate`（DOM 注入，核心无插件槽） |
 | 侧栏会话列表 | `dsh-session-time-bucket`（就地注入组头 + `[工作区]` 前缀，非槽位） |
-| 宿主 HTTP | `/__dsh-plugin-manager/{status,list,set-enabled,set-all-enabled,remove,migrate}` · `/__esc-rewind/{status,session/delete}` · `/__hindsight-model/{state,save,dsh-model,verify,clean-env,daemon,auto}` · `/__idle-hook/{status,presence,history,clear-history,test-run,reset-rule}` · `/__dsh-agent-presets/{state,file,set-enabled,create,save,remove,import,migrate}` |
+| 宿主 HTTP | `/__dsh-plugin-manager/{status,list,set-enabled,set-all-enabled,remove,migrate}` · `/__esc-rewind/{status,session/delete}` · `/__idle-hook/{status,presence,history,clear-history,test-run,reset-rule}` · `/__dsh-agent-presets/{state,file,set-enabled,create,save,remove,import,migrate}` |
+
+> `/__hindsight-model/*` 与「本地插件」页里的 `hindsight-model` tab 随 2026-10-09 退役一并消失（源码保留在仓库）。
 
 > ⚠️ 会话头图标排现在只剩**两个**插件行（27/28，`dsh-open-session-workdir` 的 25 已随插件退役）：`dsh-session-title-regenerate` 与 `dsh-esc-rewind`。核心自身另有 日程(10)/任务(20)/删除(30)，以及**另一枚分体按钮**「Open In…」——它不在 `actions` 槽，而在 `conversation.session.header.utilities`。
 

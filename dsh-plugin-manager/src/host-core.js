@@ -40,6 +40,13 @@ export const RETIRED_PLUGIN_DIRS = [
   // installed (Explorer, Git Bash, editors, terminals). This local plugin was
   // the stopgap for that gap and is now redundant. Source kept for reference.
   'dsh-open-session-workdir',
+  // 2026-10-09 — 用户要求「暂时废弃」：Hindsight（Vectorize 的长期记忆层）那个
+  // 独立 Python 守护进程的模型面板与启停控制不再由本仓维护，先从面板摘掉。
+  // 源码、README/ACCEPTANCE 与测试全部留在仓库作参考实现。
+  // 恢复：把名字从这里删掉，并去掉 profile `cordis.patch.yml` 里
+  // `hindsight-model` 那一行的 `disabled: true`。
+  // 见 docs/knowledge/2026-10-09-retire-hindsight-model.md。
+  'dsh-hindsight-model',
 ]
 /**
  * Profile workspace anchor file. pnpm reads <profile>/pnpm-workspace.yaml as the

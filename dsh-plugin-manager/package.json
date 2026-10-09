@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-manager",
-  "version": "0.3.10",
+  "version": "0.3.11",
   "description": "Local plugin manager for this dsh-plugins monorepo: install this ONE bundle in the web profile and the new Settings > 本地插件 panel manages every dsh-* sibling plugin under the repo root (activate / disable / remove / one-click migration from the legacy per-plugin layout). Host half scans the repo, keeps the activation list as stable-id rows in the profile's cordis.patch.yml (applied live by DSH's patch HMR), auto-installs missing devDependencies via pnpm, and serves /__dsh-plugin-manager/* HTTP endpoints; browser half registers the 'local-plugins' settings section.",
   "type": "module",
   "license": "MIT",

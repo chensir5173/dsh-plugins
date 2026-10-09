@@ -39,10 +39,13 @@ dsh plugin --profile web add git+https://github.com/Chen5173/dsh-plugins.git
 | 目录 | 日期 | 为什么 |
 |---|---|---|
 | `dsh-open-session-workdir` | 2026-09-18 | 核心自带「Open In…」分体按钮（`@deepseek-ai/dsh-client-ui-open-in-app`）已覆盖同一需求：会话头 `conversation.session.header.utilities` 上，主按钮=上次选过的应用打开会话 `cwd`、箭头列出宿主探测到的全部已装应用 |
+| `dsh-hindsight-model` | 2026-10-09 | 用户要求**暂时废弃**：这个面板管的是 Hindsight（Vectorize 的长期记忆层）那个**独立 Python 守护进程**的模型配置与启停 —— 与 DSH 解耦、配置落在 `~/.hindsight/`，本仓不再跟着维护 |
 
 要新退役一个子插件，**往那份数组加名字**（连日期与理由一起写），而不是删目录；要它重新回到面板，把名字从数组里删掉即可——目录与依赖声明都还在。
 
 > 已退役但仍在运行中的实例：如果它退役**之前**已经激活在 profile 里，退役**不会**自动摘掉那行 —— 先按它的 README/history 在面板里「移除」（若那时面板还列着它），或手工删掉 profile `cordis.patch.yml` 的对应 `- insert:` 行与 `package.json` 的 devDependency 后再 `pnpm install`。
+>
+> 本次退役的 `dsh-hindsight-model` 退役前在 desktop profile 里是**激活**的：已把 `- id: hindsight-model` 那一行改成 `disabled: true`（**保留激活行与依赖，只关掉**），所以功能随下一次 DSH 启动停止。恢复 = 删掉那个字段（要让面板重新列出它，还得把名字从 `RETIRED_PLUGIN_DIRS` 里删掉）。
 
 ## 它会改动你机器上的什么
 
