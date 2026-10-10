@@ -6,9 +6,9 @@
 // data/actions go to the host half's /__dsh-plugin-manager/* HTTP endpoints.
 //
 // Activation semantics surfaced here:
-//   · 主开关 on  → activate (auto pnpm declares the devDependency as
-//     `workspace:*` and maintains the workspace anchor when the package is not
-//     resolvable yet, then writes the canonical row)
+//   · 主开关 on  → activate (auto pnpm declares the devDependency as a
+//     relative `link:` into this profile's own node_modules copy, retires any
+//     leftover workspace anchor, then writes the canonical row)
 //   · 主开关 off → disable (keeps the row, sets disabled, live-stops the host)
 //   · 移除       → delete row + drop devDependency
 //   · 一键接管/迁移 → migrate the legacy per-plugin layout to manager-owned
@@ -443,9 +443,10 @@ window.__ModuleLoader__.load({
       const legacyDetected = data ? data.legacyDetected : false
       const batchCounts = (data && data.batchCounts) || localBatchCounts(plugins)
       // Dependency-repair face: the host reports (read-only) every plugin whose
-      // declaration is not what this repo needs (a leftover absolute link: spec,
-      // or a workspace anchor pointing elsewhere) and repairs the determinable
-      // ones; this panel shows what it found and offers the same action.
+      // declaration is not what this repo needs (a leftover workspace:* key or an
+      // absolute link: spec instead of the relative profile mirror) and repairs
+      // the determinable ones; this panel shows what it found and offers the
+      // same action.
       const repairPlan = (data && data.repairPlan) || { count: 0, manualCount: 0, auto: [], manual: [] }
       const staleTotal = (repairPlan.count || 0) + (repairPlan.manualCount || 0)
       const autoRelinkOn = data ? data.autoRelinkEnabled !== false : true

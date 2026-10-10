@@ -4,15 +4,15 @@
 // The core CLI (dsh plugin --profile web remove dsh-plugin-manager) is a thin
 // pnpm forwarder that only reconciles dsh.profile.bundles — it does not know
 // about the activation rows this manager wrote into the profile cordis.patch.yml,
-// and it does not touch the sub-plugins' devDependencies or the workspace anchor.
+// and it does not touch the sub-plugins' devDependencies or a retired anchor glob.
 // Removing the manager alone therefore leaves dangling rows and unmanaged
 // dependencies behind, and the next dsh web start fails with:
 // failed to import loader entry <id> …: Cannot find package …
 //
 // This script does the whole job without the DSH host and without the dsh CLI: it
 // removes every managed sub-plugin row plus the dependency keys pointing at this
-// repository (workspace:* entries, and legacy link: specs into the repo), drops
-// this repo's glob from the profile pnpm-workspace.yaml, then removes the manager
+// repository (link: specs, and retired workspace:* keys), drops this repo's
+// leftover glob from the profile pnpm-workspace.yaml, then removes the manager
 // dependency key and its
 // dsh.profile.bundles entry, then runs ONE pnpm install.
 //
@@ -160,8 +160,8 @@ export function planUninstall({ profileDir, repoRoot, engine, profile = DEFAULT_
   }
 
   // A managed dependency key is either one of THIS repo's plugin packages (the
-  // workspace:* form carries no path, so the package name is the only handle) or a
-  // legacy absolute link: spec pointing into the repo (pre-migration profiles).
+  // relative link: mirror carries no repo path, so the package name is the only
+  // handle) or a link: spec pointing into the repo (the absolute older form).
   const managedNames = new Set(managed.map((meta) => meta.name))
   const depNames = []
   for (const field of ['dependencies', 'devDependencies']) {
@@ -201,9 +201,10 @@ export function planUninstall({ profileDir, repoRoot, engine, profile = DEFAULT_
     }
   }
 
-  // The workspace anchor: this repo contributed one glob to the profile
-  // pnpm-workspace.yaml. Drop it (shape-matched, so a glob left behind by an older
-  // clone location goes too); every other entry and key stays byte-identical.
+  // A retired workspace anchor: older builds contributed one glob to the profile
+  // pnpm-workspace.yaml. Drop it if it is still there (shape-matched, so a glob
+  // left behind by an older clone location goes too); every other entry and key
+  // stays byte-identical.
   const workspaceFile = path.join(profileDir, WORKSPACE_FILE)
   let workspaceDoc = null
   let nextWorkspaceDoc = null

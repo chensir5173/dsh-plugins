@@ -136,7 +136,30 @@ try {
   assert.equal(mod.insideRoots('D:/RepoX/sub-plugins/x', ['D:/Repo'], 'win32'), false, 'prefix must be a path boundary')
   assert.equal(mod.insideRoots(path.join('C:', 'a', 'b'), ['C:/a'], 'win32'), true, 'separators are normalized')
 
-  // --- workspace:* profile (the current layout) ------------------------------
+  // --- relative link: profile (the current layout) ---------------------------
+  {
+    const relHome = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-uninstall-rel-'))
+    const relProfile = path.join(relHome, 'profiles', 'web')
+    fs.mkdirSync(relProfile, { recursive: true })
+    const relSpecOf = (dir) => 'link:./node_modules/dsh-plugin-manager/sub-plugins/' + dir
+    fs.writeFileSync(path.join(relProfile, 'package.json'), JSON.stringify({
+      name: 'dsh-profile-web',
+      dependencies: { 'dsh-plugin-manager': 'link:' + repoRoot },
+      devDependencies: { 'dsh-aaa': relSpecOf('dsh-aaa'), 'dsh-bbb': relSpecOf('dsh-bbb') },
+      dsh: { profile: { bundles: ['dsh-plugin-manager'] } },
+    }, null, 2))
+    const relEngine = { loadDoc: (t) => JSON.parse(t), dumpDoc: (d) => JSON.stringify(d) }
+    const plan = mod.planUninstall({ profileDir: relProfile, repoRoot, engine: relEngine, profile: 'web', home: relHome })
+    assert.deepEqual(plan.depNames, ['dsh-aaa', 'dsh-bbb'], 'relative link: keys are recognised by package name')
+    assert.equal(plan.workspaceChanged, false, 'no retired anchor present → nothing to rewrite')
+    const res = await mod.runUninstall(plan, { engine: relEngine, pnpm: async () => ({ ok: true, code: 0 }) })
+    assert.equal(res.installed, true)
+    const after = JSON.parse(fs.readFileSync(path.join(relProfile, 'package.json'), 'utf8'))
+    assert.equal(after.devDependencies['dsh-aaa'], undefined, 'relative link: dependency key removed')
+    fs.rmSync(relHome, { recursive: true, force: true })
+  }
+
+  // --- retired workspace:* profile: keys and the anchor glob are still cleaned -
   {
     const wsHome = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-uninstall-ws-'))
     const wsProfile = path.join(wsHome, 'profiles', 'web')

@@ -20,7 +20,10 @@ import {
   listRepoPluginDirs,
   readPluginMeta,
   rowIdOfDir,
-  workspaceDepSpec,
+  linkDepSpec,
+  mirrorDirOf,
+  staleDepSpec,
+  LINK_PROTOCOL,
   findRow,
   upsertManaged,
   removeManaged,
@@ -31,7 +34,6 @@ import {
   PLUGINS_DIRNAME,
   pluginRootsOf,
   pluginAbsDirOf,
-  staleDepSpec,
   INTENT_DEBOUNCE_MS,
   mergeIntent,
   applyIntents,
@@ -42,9 +44,8 @@ import {
   REMOVE_REASONS,
   DEP_STATES,
   depStateOf,
-  WORKSPACE_SPEC,
   workspaceStateOf,
-  upsertWorkspaceGlob,
+  retireWorkspaceGlob,
   samePath,
   repairPlan,
   REPAIR_REASONS,
@@ -52,6 +53,12 @@ import {
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-plugin-manager-test-'))
+
+/** 假 profile 目录 + 「镜像目录已存在」的 IO 桩（真实 git 安装里 linkDepSpec 走相对形态）。 */
+const PROFILE = '/profile'
+const relIo = { exists: () => true }
+/** linkDepSpec() 在镜像存在时写出的相对规格。 */
+const relSpec = (dir) => LINK_PROTOCOL + './node_modules/' + MANAGER_DIR + '/' + PLUGINS_DIRNAME + '/' + dir
 
 /** JSON-subset yaml stub: fixtures are JSON, so load/dump === parse/stringify. */
 function jsonEngine() {
@@ -111,7 +118,24 @@ function samplePlugins(root) {
   assert.equal(bad2.valid, false)
   assert.equal(bad2.error, 'no-plugin-package')
   assert.equal(rowIdOfDir('dsh-session-time-bucket'), 'session-time-bucket')
-  assert.equal(workspaceDepSpec(), WORKSPACE_SPEC, '写进 profile 的规格永远是 workspace 协议，不含路径')
+  const mirror = LINK_PROTOCOL + './node_modules/' + MANAGER_DIR + '/' + PLUGINS_DIRNAME + '/dsh-aaa'
+  assert.equal(
+    linkDepSpec('/profile', { dir: 'dsh-aaa', dirPath: '/repo/' + PLUGINS_DIRNAME + '/dsh-aaa' }, { exists: () => true }),
+    mirror,
+    '镜像目录存在 → 相对 profile 的 link: 规格（不含盘符/用户名）',
+  )
+  assert.equal(
+    linkDepSpec('/profile', { dir: 'dsh-aaa', dirPath: '/repo/' + PLUGINS_DIRNAME + '/dsh-aaa' }, { exists: () => false }),
+    LINK_PROTOCOL + '/repo/' + PLUGINS_DIRNAME + '/dsh-aaa',
+    '镜像目录不存在 → 回退到插件目录的绝对路径',
+  )
+  assert.equal(
+    mirrorDirOf('/profile', { dir: 'dsh-aaa' }),
+    path.join('/profile', 'node_modules', MANAGER_DIR, PLUGINS_DIRNAME, 'dsh-aaa'),
+    '镜像目录 = <profile>/node_modules/<manager>/<sub-plugins>/<dir>',
+  )
+  assert.equal(mirrorDirOf('/profile', { dir: '' }), null, 'dir 为空时不推导镜像目录')
+  assert.equal(mirrorDirOf('/profile', null), null, 'meta 缺失时不推导镜像目录')
 }
 
 {
@@ -238,13 +262,23 @@ function samplePlugins(root) {
     dsh: { profile: { bundles: ['@deepseek-ai/dsh-web-app', 'dsh-aaa', 'dsh-bbb', 'dsh-local-plugins'] } },
   }
   const rows = [{ id: 'ccc', name: 'dsh-ccc', disabled: true }] // disabled override for ccc
-  const plan = planMigration({ repoPlugins: plugins, manifest, rows, repoRoot: repo, workspace: { packages: ['.'] } })
+  const legacyGlob = workspaceStateOf({}, repo).glob
+  const plan = planMigration({
+    repoPlugins: plugins,
+    manifest,
+    rows,
+    repoRoot: repo,
+    profileDir: PROFILE,
+    io: relIo,
+    workspace: { packages: ['.', legacyGlob] },
+  })
 
   assert.equal(plan.needsMigration, true)
-  assert.equal(plan.workspaceChanged, true, '接管同时补上 workspace 锚点')
-  assert.equal(plan.newWorkspace.packages.includes(workspaceStateOf({}, repo).glob), true)
+  assert.equal(plan.workspaceChanged, true, '接管同时清掉指向本仓库的残留 workspace 锚点')
+  assert.equal(plan.newWorkspace.packages.includes(legacyGlob), false, '残留 glob 被移除')
+  assert.deepEqual(plan.summary.retiredWorkspaceGlobs, [legacyGlob])
   const nm = plan.newManifest
-  assert.equal(nm.devDependencies['dsh-aaa'], workspaceDepSpec(path.join(repo, 'dsh-aaa')))
+  assert.equal(nm.devDependencies['dsh-aaa'], relSpec('dsh-aaa'))
   assert.equal(nm.dependencies['dsh-aaa'], undefined)
   assert.equal(nm.dependencies['dsh-local-plugins'], undefined, 'umbrella retired from deps')
   assert.deepEqual(nm.dsh.profile.bundles, ['@deepseek-ai/dsh-web-app', 'dsh-plugin-manager'], 'bundles: only manager remains local')
@@ -266,15 +300,14 @@ function samplePlugins(root) {
   const plugins = listRepoPluginDirs(writeRepo(repo, ['dsh-aaa']) || repo).map((d) => readPluginMeta(repo, d))
   const manifest = {
     dependencies: { 'dsh-plugin-manager': 'link:D:/repo/dsh-plugin-manager' },
-    devDependencies: { 'dsh-aaa': workspaceDepSpec(path.join(repo, 'dsh-aaa')) },
+    devDependencies: { 'dsh-aaa': relSpec('dsh-aaa') },
     dsh: { profile: { bundles: ['@deepseek-ai/dsh-web-app', 'dsh-plugin-manager'] } },
   }
   const rows = [{ insert: [{ id: 'aaa', name: 'dsh-aaa' }] }]
-  const anchored = { packages: ['.', workspaceStateOf({}, repo).glob] }
-  const plan = planMigration({ repoPlugins: plugins, manifest, rows, repoRoot: repo, workspace: anchored })
+  const plan = planMigration({ repoPlugins: plugins, manifest, rows, repoRoot: repo, profileDir: PROFILE, io: relIo, workspace: { packages: ['.'] } })
   assert.equal(plan.needsMigration, false, 'migrated profile: no further changes')
   assert.deepEqual(plan.summary.moved, [])
-  assert.equal(plan.workspaceChanged, false, 'workspace 锚点已就位 → 不写文件')
+  assert.equal(plan.workspaceChanged, false, '没有残留锚点 → 不写 pnpm-workspace.yaml')
 }
 
 // --- sub-plugins/ nested layout (preferred plugin root) ----------------------
@@ -319,11 +352,11 @@ function samplePlugins(root) {
     dependencies: { 'dsh-aaa': 'link:D:/old/dsh-aaa' },
     dsh: { profile: { bundles: ['@deepseek-ai/dsh-web-app', 'dsh-plugin-manager'] } },
   }
-  const plan = planMigration({ repoPlugins: plugins, manifest, rows: [], repoRoot: repo })
+  const plan = planMigration({ repoPlugins: plugins, manifest, rows: [], repoRoot: repo, profileDir: PROFILE, io: relIo })
   assert.equal(
     plan.newManifest.devDependencies['dsh-aaa'],
-    workspaceDepSpec(path.join(repo, PLUGINS_DIRNAME, 'dsh-aaa')),
-    'migrated devDep points at sub-plugins/, not the repo root',
+    relSpec('dsh-aaa'),
+    'migrated devDep uses the relative mirror spec of the plugin dir',
   )
 }
 
@@ -334,21 +367,28 @@ function samplePlugins(root) {
   writeRepo(path.join(repo, PLUGINS_DIRNAME), ['dsh-aaa'])
   const meta = readPluginMeta(repo, 'dsh-aaa')
 
-  assert.equal(staleDepSpec({ devDependencies: {} }, meta), null, 'absent devDep is not a stale link')
+  const expected = relSpec('dsh-aaa')
+  assert.equal(staleDepSpec({ devDependencies: {} }, meta, expected), null, 'absent devDep is not a stale link')
   assert.equal(
-    staleDepSpec({ devDependencies: { 'dsh-aaa': 'link:D:/elsewhere' } }, { name: 'dsh-other', dirPath: meta.dirPath }),
+    staleDepSpec({ devDependencies: { 'dsh-aaa': 'link:D:/elsewhere' } }, { name: 'dsh-other', dirPath: meta.dirPath }, expected),
     null,
     'only the given package name is ours to repair',
   )
   assert.equal(
-    staleDepSpec({ devDependencies: { 'dsh-aaa': workspaceDepSpec(meta.dirPath) } }, meta),
+    staleDepSpec({ devDependencies: { 'dsh-aaa': expected } }, meta, expected),
     null,
     'already-correct spec needs no repair',
   )
+  assert.equal(
+    staleDepSpec({ devDependencies: { 'dsh-aaa': 'workspace:*' } }, meta, expected).from,
+    'workspace:*',
+    'the retired workspace protocol is reported as stale',
+  )
+  assert.equal(staleDepSpec({ devDependencies: { 'dsh-aaa': 'link:D:/repo/dsh-aaa' } }, meta, null), null, 'no expected spec → not repairable')
   assert.deepEqual(
-    staleDepSpec({ devDependencies: { 'dsh-aaa': 'link:D:/repo/dsh-aaa' } }, meta),
-    { from: 'link:D:/repo/dsh-aaa', to: workspaceDepSpec(meta.dirPath) },
-    'a link pointing at the old flat path is reported with both specs',
+    staleDepSpec({ devDependencies: { 'dsh-aaa': 'link:D:/repo/dsh-aaa' } }, meta, expected),
+    { from: 'link:D:/repo/dsh-aaa', to: expected },
+    'an absolute link pointing at the repo is reported with both specs',
   )
 }
 
@@ -592,42 +632,41 @@ function fakeFsIo({ exists = [], platform = 'win32' } = {}) {
   const here2 = 'D:/repo/sub-plugins/dsh-aaa'
   const meta = { dir: 'dsh-aaa', name: 'dsh-aaa', dirPath: here2 }
   const io = fakeFsIo({ exists: [here2] })
-  const anchored = { ok: true, glob: 'D:/repo/sub-plugins/*' }
-  const anchorMissing = { ok: false, glob: 'D:/repo/sub-plugins/*' }
+  const expected = relSpec('dsh-aaa')
 
-  // 无键 → absent
-  assert.equal(depStateOf({}, meta, anchored, io), DEP_STATES.absent)
-  assert.equal(depStateOf({ devDependencies: { 'dsh-aaa': '' } }, meta, anchored, io), DEP_STATES.absent)
+  // 无键（或空串）→ absent
+  assert.equal(depStateOf({}, meta, expected, io), DEP_STATES.absent)
+  assert.equal(depStateOf({ devDependencies: { 'dsh-aaa': '' } }, meta, expected, io), DEP_STATES.absent)
 
-  // workspace 协议 + 锚点就位 → fresh
-  assert.equal(depStateOf({ devDependencies: { 'dsh-aaa': workspaceDepSpec() } }, meta, anchored, io), DEP_STATES.fresh)
-  assert.equal(depStateOf({ devDependencies: { 'dsh-aaa': 'workspace:^' } }, meta, anchored, io), DEP_STATES.fresh, 'workspace:^ 也算就位')
+  // 键值正好是期望的相对规格 → fresh
+  assert.equal(depStateOf({ devDependencies: { 'dsh-aaa': expected } }, meta, expected, io), DEP_STATES.fresh)
 
-  // 任何非 workspace 协议（遗留 link: 绝对路径、版本号、file:）→ stale-mismatch（可自动改写）
-  for (const spec of ['link:D:/old/dsh-aaa', 'link:./dsh-aaa', '^1.0.0', 'file:../dsh-aaa']) {
-    assert.equal(depStateOf({ devDependencies: { 'dsh-aaa': spec } }, meta, anchored, io), DEP_STATES.mismatch, spec)
+  // 任何别的规格（旧 workspace 协议、遗留绝对 link:、版本号、file:）→ stale-mismatch（可自动改写）
+  for (const spec of ['workspace:*', 'workspace:^', 'link:D:/old/dsh-aaa', 'link:./dsh-aaa', '^1.0.0', 'file:../dsh-aaa']) {
+    assert.equal(depStateOf({ devDependencies: { 'dsh-aaa': spec } }, meta, expected, io), DEP_STATES.mismatch, spec)
   }
   assert.equal(samePath('D:/Repo/X/', 'D:\\Repo\\X', 'win32'), true)
   assert.equal(samePath('/repo/x', '/repo/X', 'linux'), false)
 
-  // workspace 规格没错，但锚点没放行本仓库 → stale-target-missing（可自动补 glob）
-  assert.equal(depStateOf({ devDependencies: { 'dsh-aaa': 'workspace:*' } }, meta, anchorMissing, io), DEP_STATES.missing)
+  // 推导不出期望规格（插件目录缺失）→ 同样按 mismatch 处理，交给上层提示
+  assert.equal(depStateOf({ devDependencies: { 'dsh-aaa': expected } }, meta, null, io), DEP_STATES.mismatch)
 
-  // 连实际目录都不存在 → stale-unresolved（只能提示）
-  assert.equal(depStateOf({ devDependencies: { 'dsh-aaa': 'workspace:*' } }, meta, anchored, fakeFsIo({ exists: [] })), DEP_STATES.unresolved)
+  // 规格对，但该规格落到的实际目录不存在 → stale-unresolved（只能提示）
+  const absolute = 'link:D:/repo/sub-plugins/dsh-aaa'
+  assert.equal(depStateOf({ devDependencies: { 'dsh-aaa': absolute } }, meta, absolute, fakeFsIo({ exists: [] })), DEP_STATES.unresolved)
 
   // IO 抛错 → unknown（只提示，绝不猜）
   const throwing = { platform: 'win32', exists: () => { throw new Error('boom') }, realpath: (p) => String(p) }
-  assert.equal(depStateOf({ devDependencies: { 'dsh-aaa': 'workspace:*' } }, meta, anchored, throwing), DEP_STATES.unknown)
+  assert.equal(depStateOf({ devDependencies: { 'dsh-aaa': expected } }, meta, expected, throwing), DEP_STATES.unknown)
 }
 
 {
   // repairPlan：可自动修 / 只能提示 两类分开，且管理器自身不参与
   const derived = [
-    { dir: 'dsh-fresh', name: 'dsh-fresh', dirPath: '/r/dsh-fresh', depState: DEP_STATES.fresh, depDeclared: WORKSPACE_SPEC, depExpected: WORKSPACE_SPEC },
+    { dir: 'dsh-fresh', name: 'dsh-fresh', dirPath: '/r/dsh-fresh', depState: DEP_STATES.fresh, depDeclared: relSpec('dsh-fresh'), depExpected: relSpec('dsh-fresh') },
     { dir: 'dsh-absent', name: 'dsh-absent', dirPath: '/r/dsh-absent', depState: DEP_STATES.absent },
-    { dir: 'dsh-moved', name: 'dsh-moved', dirPath: '/r/sub-plugins/dsh-moved', depState: DEP_STATES.mismatch, depDeclared: 'link:/old/dsh-moved', depExpected: WORKSPACE_SPEC },
-    { dir: 'dsh-gone', name: 'dsh-gone', dirPath: '/r/sub-plugins/dsh-gone', depState: DEP_STATES.missing, depDeclared: WORKSPACE_SPEC, depExpected: WORKSPACE_SPEC },
+    { dir: 'dsh-moved', name: 'dsh-moved', dirPath: '/r/sub-plugins/dsh-moved', depState: DEP_STATES.mismatch, depDeclared: 'link:/old/dsh-moved', depExpected: relSpec('dsh-moved') },
+    { dir: 'dsh-gone', name: 'dsh-gone', dirPath: '/r/sub-plugins/dsh-gone', depState: DEP_STATES.missing, depDeclared: relSpec('dsh-gone'), depExpected: relSpec('dsh-gone') },
     { dir: 'dsh-lost', name: 'dsh-lost', dirPath: '/r/sub-plugins/dsh-lost', depState: DEP_STATES.unresolved },
     { dir: 'dsh-weird', name: 'dsh-weird', dirPath: '/r/dsh-weird', depState: DEP_STATES.unknown },
     { dir: MANAGER_DIR, name: MANAGER_DIR, dirPath: '/r/dsh-plugin-manager', depState: DEP_STATES.mismatch },
@@ -638,7 +677,7 @@ function fakeFsIo({ exists = [], platform = 'win32' } = {}) {
   assert.equal(plan.count, 2)
   assert.equal(plan.manualCount, 2)
   assert.equal(plan.manual[0].reason, REPAIR_REASONS[DEP_STATES.unresolved])
-  assert.equal(plan.auto[0].expected, WORKSPACE_SPEC, '期望值就是 workspace:*')
+  assert.equal(plan.auto[0].expected, relSpec('dsh-moved'), '期望值就是该插件的相对 link: 规格')
   assert.equal(repairPlan(undefined).count, 0)
   assert.equal(repairPlan([{ dir: 'x', depState: DEP_STATES.fresh }]).count, 0)
 }
@@ -653,21 +692,20 @@ function fakeFsIo({ exists = [], platform = 'win32' } = {}) {
   const repoPlugins = ['dsh-aaa', 'dsh-bbb'].map((dir) => readPluginMeta(repoRoot, dir))
   const manifest = {
     devDependencies: {
-      'dsh-aaa': 'link:D:/old/dsh-aaa',   // 遗留绝对路径：要改写成 workspace:*
-      'dsh-bbb': workspaceDepSpec(),       // 正常
+      'dsh-aaa': 'link:D:/old/dsh-aaa',   // 遗留绝对路径：要改写成相对 link:
+      'dsh-bbb': relSpec('dsh-bbb'),       // 正常
     },
   }
   const rows = [
     { id: 'aaa', disabled: false },
     { id: 'bbb', disabled: true },
   ]
-  const io = fakeFsIo({ exists: [repoPlugins[0].dirPath, repoPlugins[1].dirPath] })
-  const derived = deriveStates({ repoPlugins, manifest, rows, workspace: { ok: true }, io })
+  const derived = deriveStates({ repoPlugins, manifest, rows, profileDir: PROFILE, io: relIo })
   assert.equal(derived[0].depState, DEP_STATES.mismatch)
   assert.equal(derived[0].depDeclared, 'link:D:/old/dsh-aaa')
-  assert.equal(derived[0].depExpected, WORKSPACE_SPEC)
+  assert.equal(derived[0].depExpected, relSpec('dsh-aaa'))
   assert.equal(derived[1].depState, DEP_STATES.fresh)
-  assert.equal(derived[1].depDeclared, WORKSPACE_SPEC)
+  assert.equal(derived[1].depDeclared, relSpec('dsh-bbb'))
 
   const plan = batchPlan(derived, true)
   const aaa = plan.targets.find((t) => t.dir === 'dsh-aaa')
@@ -681,8 +719,8 @@ function fakeFsIo({ exists = [], platform = 'win32' } = {}) {
     repoPlugins: [repoPlugins[0]],
     manifest: { devDependencies: { 'dsh-aaa': 'link:D:/old/dsh-aaa' } },
     rows: [],
-    workspace: { ok: true },
-    io,
+    profileDir: PROFILE,
+    io: relIo,
   })
   assert.equal(noRow[0].state, 'inactive')
   const plan2 = batchPlan(noRow, true)
@@ -695,23 +733,26 @@ function fakeFsIo({ exists = [], platform = 'win32' } = {}) {
 {
   const anchorRepo = path.join(tmpRoot, 'wsanchor')
   fs.mkdirSync(path.join(anchorRepo, 'sub-plugins', 'dsh-aaa'), { recursive: true })
-  const before = workspaceStateOf({}, anchorRepo)
-  assert.equal(before.ok, false, '空文档里没有放行本仓库的 glob')
-  assert.equal(before.glob.endsWith('sub-plugins/*'), true)
+  const legacyGlob = workspaceStateOf({}, anchorRepo).glob
+  assert.equal(legacyGlob.endsWith('sub-plugins/*'), true, '遗留锚点形状可被识别')
 
-  const up1 = upsertWorkspaceGlob({ packages: ['.'] }, anchorRepo)
-  assert.equal(up1.changed, true)
-  assert.equal(up1.doc.packages.includes(up1.state.glob), true)
-  assert.equal(workspaceStateOf(up1.doc, anchorRepo).ok, true, '补上 glob 后锚点就位')
-  assert.equal(upsertWorkspaceGlob(up1.doc, anchorRepo).changed, false, '已就位 → 幂等，零写入')
+  const clean = workspaceStateOf({ packages: ['.'] }, anchorRepo)
+  assert.equal(clean.ok, true, '没有指向本仓库的 glob → 干净')
+  assert.deepEqual(clean.repoGlobs, [])
+  assert.equal(retireWorkspaceGlob({ packages: ['.'] }, anchorRepo).changed, false, '干净文件 → 幂等，零写入')
 
-  // 迁移自愈：指向旧位置的 glob 被换掉，其它条目与键原样保留
-  const healed = upsertWorkspaceGlob({ packages: ['.', 'D:/old/repo/sub-plugins/*'], nodeLinker: 'hoisted' }, anchorRepo)
-  assert.equal(healed.changed, true)
-  assert.deepEqual(healed.doc.packages.filter((e) => e.indexOf('sub-plugins/*') >= 0), [healed.state.glob])
-  assert.equal(healed.doc.nodeLinker, 'hoisted', '无关的键不动')
-  assert.equal(workspaceStateOf(healed.doc, anchorRepo).staleGlobs.length, 0)
-  assert.equal(upsertWorkspaceGlob({ packages: ['packages/*'] }, anchorRepo).doc.packages.includes('packages/*'), true, '与本仓库无关的 glob 保留')
+  // 退役清理：指向本仓库的 glob 被删掉，其它条目与键原样保留
+  const legacy = workspaceStateOf({ packages: ['.', legacyGlob] }, anchorRepo)
+  assert.equal(legacy.ok, false, '残留锚点被识别为待清理')
+  assert.deepEqual(legacy.repoGlobs, [legacyGlob])
+  const retired = retireWorkspaceGlob({ packages: ['.', legacyGlob], nodeLinker: 'hoisted' }, anchorRepo)
+  assert.equal(retired.changed, true)
+  assert.deepEqual(retired.removed, [legacyGlob])
+  assert.deepEqual(retired.doc.packages, ['.'])
+  assert.equal(retired.doc.nodeLinker, 'hoisted', '无关的键不动')
+  assert.equal(workspaceStateOf(retired.doc, anchorRepo).ok, true, '清理后不再有待退役条目')
+  assert.equal(retireWorkspaceGlob(retired.doc, anchorRepo).changed, false, '已清理 → 幂等，零写入')
+  assert.equal(retireWorkspaceGlob({ packages: ['packages/*'] }, anchorRepo).doc.packages.includes('packages/*'), true, '与本仓库无关的 glob 保留')
 }
 
 fs.rmSync(tmpRoot, { recursive: true, force: true })

@@ -182,7 +182,7 @@
 
 ## A14 陈旧链接的自动检测与自愈（2026-09-22，变更 `2026-09-22-stale-link-selfheal`）
 
-> **已被 A15 取代（2026-10-09）**：本节记录的是当时的实现事实。函数已改名 `linkStateOf → depStateOf`、`relinkPlan → repairPlan`、`staleLinkSpec → staleDepSpec`，检测对象也从「`link:` 指向对不对」变成「规格是否为 `workspace:` 协议 + workspace 锚点是否放行本仓库」；`linkState/linkDeclared/linkExpected` 字段相应改为 `depState/depDeclared/depExpected`，面板按钮改叫「修复依赖」。历史记录保留，逐条现状见 A15。
+> **已被 A15 取代（2026-10-09）**：本节记录的是当时的实现事实。函数已改名 `linkStateOf → depStateOf`、`relinkPlan → repairPlan`、`staleLinkSpec → staleDepSpec`，检测对象也从「`link:` 指向对不对」变成「规格是否为 `workspace:` 协议 + workspace 锚点是否放行本仓库」；`linkState/linkDeclared/linkExpected` 字段相应改为 `depState/depDeclared/depExpected`，面板按钮改叫「修复依赖」。历史记录保留，逐条现状见 A15。**2026-10-10 的 A16 又把这条路线整体换成相对 `link:` 规格、锚点退役，最终形态以 A16 为准。**
 
 - [x] 自动化：`linkStateOf` 判定矩阵——无键 / 正确 / 指向别处 / 目标不存在 / 连实际目录都不存在 / 非 `link:` 写法 / IO 抛错，且**仅大小写与分隔符差异算 fresh**（host-core.test 的 stale-link 分组）。
 - [x] 自动化：`relinkPlan` 把「可自动修」与「只能提示」分开并给出计数，管理器自身不参与（同上）。
@@ -198,6 +198,8 @@
 
 ## A15 依赖声明去绝对路径：pnpm workspace 聚合（2026-10-09，变更 `2026-10-09-workspace-anchor`）
 
+> **已被 A16 取代（2026-10-10）**：`workspace:*` 协议与锚点 glob 已退役。git 快照安装时锚点落在 `<profile>/node_modules/dsh-plugin-manager/sub-plugins/*`——pnpm 枚举 workspace 成员时**跳过 node_modules 下的路径**，于是 8 条 `workspace:*` 全部 `ERR_PNPM_WORKSPACE_PKG_NOT_FOUND`、install 退出码 1 → 回滚 → 面板「已开启 0 个本地插件 失败 8 项」。本段保留为历史记录，现状见 A16。
+
 动机（用户原话）："当前项目不要再使用 link 绝对地址的方式来管理插件了，迁移的时候容易报错"。
 做法：profile `devDependencies` 里每个受管子插件写成 `"<name>": "workspace:*"`（**不含路径**）；profile 的 `pnpm-workspace.yaml` 里由管理器维护**唯一一条**指向本仓库插件目录的 glob（`<repo>/sub-plugins/*`）。DSH 侧解析路径不变（profile `node_modules/<name>` → 仓库目录），patch 行的 name 仍是纯包名，所以设置页的标题/描述/图标照旧。管理器自身那条 `link:<repo>` 属于**安装入口**（`dsh plugin add` 写入），管理器不自行改写它——避免锚点出问题时把自己锁在外面。
 
@@ -210,4 +212,20 @@
 - [x] 端到端实测（隔离 `DSH_HOME`、pnpm 用桩、**未触碰运行中的 web profile**）：profile 里放两条 `link:`（一条指向当前目录、一条指向 `D:/old/machine/...`）+ `pnpm-workspace.yaml` 只有 `packages: ["."]` → 宿主启动自检把两条都改写成 `workspace:*`、锚点补上 `C:/…/dsh-plugins/sub-plugins/*`（`nodeLinker`/`autoInstallPeers` 原样保留）、只跑一次 install；`/list` 两条都 `fresh`、`repairPlan.count=0`；`/repair` 幂等 noop；`/migrate` 把 bundles 收敛成只剩管理器并写激活行。
 - [x] 迁移可行性实测（真实 pnpm 11.23 + 临时 profile）：`pnpm-workspace.yaml` 放行 `<repo>/sub-plugins/*` + 依赖写 `workspace:*` → `pnpm install` 成功（`Scope: all 11 workspace projects`），`node_modules/<name>` 与仓库目录**同 inode**（Windows junction），写文件到仓库侧立刻透过 `node_modules` 可见，`createRequire` 能解析 `package.json` / `.` / `./client`。仓库目录改名后 install 报 `ERR_PNPM_WORKSPACE_PKG_NOT_FOUND`，改回即恢复 —— 正是启动自检要覆盖的场景。
 - [x] 回归：`host-core.test.mjs`、`bundle.test.mjs`、`uninstall.test.mjs`、`entry-config.test.mjs`、`root-install-shell.test.mjs` 全绿；`debounce.test.mjs` / `batch-remove-all.test.mjs` 因本机 `symlink EPERM` 无法跑（既有环境性红，与本次改动无关）。
-- [ ] 需真机：在真实 web profile 上重启一次 → 面板横幅为 0、`/status` 的 `workspace.ok === true`、profile `package.json` 的 `devDependencies` 里不再有任何子插件的 `link:` 绝对路径。
+- [ ] 需真机（A15 遗留项，已被 A16 的验收项取代）：在真实 web profile 上重启一次 → 面板横幅为 0。
+## A16 依赖声明改用相对 `link:`：锚点退役（2026-10-10，用户选定方案 A）
+
+动机：A15 的 `workspace:*` + 锚点方案只在「从仓库目录安装」的形态下验证过（`docs/change-reports/2026-10-09-workspace-anchor-change-report.md`）。git 快照安装时管理器被装在 `<profile>/node_modules/dsh-plugin-manager`，锚点 glob 因此写成该路径下的 `sub-plugins/*`；pnpm 枚举 workspace 成员时跳过 `node_modules` 下的路径，8 条 `workspace:*` 全部解析失败（`ERR_PNPM_WORKSPACE_PKG_NOT_FOUND`）→ install 退出码 1 → 回滚 profile `package.json` → 面板显示「已开启 0 个本地插件 失败 8 项」。错误文案也丢了：pnpm 把 `ERR_PNPM_*` 写在 **stdout**，而 `execPnpm` 只取 stderr（为空）→ 面板只显示兜底文案 `pnpm install failed`。
+
+做法：依赖规格改成**相对 profile 的 `link:`** `"<name>": "link:./node_modules/dsh-plugin-manager/sub-plugins/<dir>"`——它指向 profile 里那份管理器拷贝（git 安装时就在 profile 里；本地检出安装时 `<profile>/node_modules/dsh-plugin-manager` 同样可达），所以**不含盘符、用户名与仓库绝对路径**；只有当该镜像目录不可达时才退回 `link:<插件绝对目录>`。`pnpm-workspace.yaml` 锚点机制退役：只保留**残留清理**（形状匹配本仓库的 glob 被删，其它 glob 与键逐字节不动，干净文件零写入）。就绪判据从「协议 + 锚点」变成「规格与期望**全等**」。旧的 `workspace:*` 键与遗留绝对 `link:` 都会在下一次启用/修复/迁移时被改写成新规格。
+
+- [x] 自动化：`linkDepSpec(profileDir, meta, io)` 两形态——镜像可达 → 相对规格；不可达 → 绝对回退；`mirrorDirOf()` 对空 `profileDir`/空 `dir`/null meta 返回 null（host-core.test「dependency-state detection」分组）。
+- [x] 自动化：`depStateOf(manifest, meta, expected, io)` 判定矩阵——无键/空串 → `absent`；规格与期望全等 → `fresh`；`workspace:*` / `workspace:^` / 遗留 `link:D:/old` / `link:./` / `^1.0.0` / `file:` → `stale-mismatch`；期望无法推导（目录缺失）→ `stale-mismatch`；规格对但目标目录不存在 → `stale-unresolved`；IO 抛错 → `unknown`。
+- [x] 自动化：`retireWorkspaceGlob(doc, repoRoot)`——干净文档 `changed=false`（零写入）；残留下返回 `removed=[<glob>]` 且 `doc.packages` 只剩无关条目、`nodeLinker` 等键原样；清理后再调用 `changed=false`（幂等）；`packages/*` 这类无关 glob 保留（host-core.test「retired workspace anchor」分组）。
+- [x] 自动化：`planMigration()` 把 legacy 绝对 `link:` 改写成相对规格、并在锚点有残留时报 `workspaceChanged=true` + `summary.retiredWorkspaceGlobs`；锚点已干净时报 `workspaceChanged=false`（host-core.test 迁移分组）。
+- [x] 自动化：`debounce.test.mjs` 就绪即零写入——临时 profile 的可达规格下点启用/重定位不写 `package.json`、不跑 install；规格陈旧时恰好一次 install 且响应里回到 `fresh`。
+- [x] 自动化：`uninstall.test.mjs` 覆盖两种 profile——相对 `link:` 布局（按包名识别依赖键、`workspaceChanged=false`、键被摘掉）与退役 `workspace:*` 布局（键与残留锚点 glob 一并清掉）。
+- [x] 端到端实测（真实 pnpm 11.21.0 + 临时 profile，探针 `.tmp-probe/link-install.mjs`）：`devDependencies` 写 `"dsh-fake": "link:./node_modules/dsh-plugin-manager/sub-plugins/dsh-fake"`（目标就在 profile 的 `node_modules` 内）+ `pnpm-workspace.yaml` 只有 `packages: ['.']` → `pnpm install` 输出 `Done in 648ms using pnpm v11.21.0`、退出码 **0**；安装后 `node_modules/dsh-fake` 可被 `require` 加载；`package.json` 里的规格**未被 pnpm 改写**（`SPEC_UNCHANGED=true`）——就绪判据不会反复触发 install。
+- [x] 修复：`execPnpm` 失败文案在 stderr 为空时回退 **stdout**，`ERR_PNPM_*` 不再被吞成 `pnpm install failed`。
+- [x] 回归：7 支测试全绿——`host-core` / `bundle` / `debounce` / `batch-remove-all` / `uninstall` / `root-install-shell` / `entry-config`。其中 `debounce` 与 `batch-remove-all` 原本依赖 `fs.symlinkSync(realYaml, …, 'junction')` 让临时 profile 能解析 `js-yaml`，在受限 Windows shell 下 `EPERM`；改为「junction 失败则 `fs.cpSync` 复制」，语义不变（仍不改真实 profile）。
+- [ ] 需真机：把 profile 里 `dsh-plugin-manager` 的 spec（当前钉在 `github:…/dsh-plugins#3b6640c`）更新到含本次修复的提交 → 重启 desktop profile → 面板「全部开启」8 项全部成功；`profile/package.json` 的 8 条子插件键变成 `link:./node_modules/dsh-plugin-manager/sub-plugins/<dir>`；`pnpm-workspace.yaml` 里那条旧锚点消失；`/status` 的 `workspace.ok === true`。

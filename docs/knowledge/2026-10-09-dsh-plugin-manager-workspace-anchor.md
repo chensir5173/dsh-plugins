@@ -1,5 +1,7 @@
 # dsh-plugin-manager：子插件依赖去绝对路径（pnpm workspace 聚合）
 
+> ⚠️ **已被取代（2026-10-10）**：本篇的 `workspace:*` + 锚点方案在 git 快照安装形态下不成立（锚点 glob 落在 `node_modules` 内，pnpm 跳过该成员），已整体换成相对 `link:` 规格 —— 见 [2026-10-10-dsh-plugin-manager-relative-link.md](2026-10-10-dsh-plugin-manager-relative-link.md) 与 `ACCEPTANCE.md` A16。下面「可复用的实测结论」里的 pnpm 行为与 junction 危险点仍有效，做法部分作废。
+
 日期：2026-10-09　变更：`2026-10-09-workspace-anchor`（验收清单见 `dsh-plugin-manager/ACCEPTANCE.md` A15）
 
 ## 问题与结论

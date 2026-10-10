@@ -47,7 +47,6 @@ import {
   YAML_PKG,
   YAML_PKG_RANGE,
   WORKSPACE_FILE,
-  WORKSPACE_SPEC,
   applyIntents,
   upsertManagedMany,
   batchPlan,
@@ -67,11 +66,10 @@ import {
   removeManaged,
   deriveStates,
   planMigration,
-  isWorkspaceSpec,
+  linkDepSpec,
   pluginsGlobOf,
   repairPlan,
-  staleDepSpec,
-  upsertWorkspaceGlob,
+  retireWorkspaceGlob,
   workspaceStateOf,
   pluginRootsOf,
 } from './host-core.js'
@@ -104,9 +102,9 @@ export const HOST_DIAG = {
   lastRelink: null,
   /** Whether the automatic dependency-repair switch is on. */
   autoRelinkEnabled: true,
-  /** Workspace anchor (pnpm-workspace.yaml) view: { file, glob, ok, staleGlobs }. */
+  /** Retired workspace-anchor (pnpm-workspace.yaml) view: { file, glob, ok, repoGlobs }. */
   workspace: null,
-  /** Last automatic workspace-glob repair (null until one happens). */
+  /** Last automatic cleanup of retired workspace globs (null until one happens). */
   workspaceRepair: null,
 }
 
@@ -276,7 +274,7 @@ function execPnpm(profileDir, args, timeoutMs = 180000) {
     })
     child.on('close', (code) => {
       clearTimeout(timer)
-      resolve({ ok: code === 0, code: code == null ? 1 : code, error: code === 0 ? null : stderr.trim(), stdout, stderr })
+      resolve({ ok: code === 0, code: code == null ? 1 : code, error: code === 0 ? null : (stderr.trim() || stdout.trim()), stdout, stderr })
     })
   })
 }
@@ -376,15 +374,16 @@ function readPlugins(repoRoot) {
   return listRepoPluginDirs(repoRoot).map((dir) => readPluginMeta(repoRoot, dir))
 }
 
-// --- workspace anchor (pnpm-workspace.yaml) ---------------------------------
+// --- retired workspace anchor (pnpm-workspace.yaml) -------------------------
 //
-// Managed siblings are declared as plain `workspace:*` devDependencies; the ONLY
-// place that still knows where this repository lives is the workspace anchor — one
-// glob entry in <profile>/pnpm-workspace.yaml. Keeping that anchor correct here
-// (idempotent, writing only when something actually has to change) is what lets a
-// profile survive a repo that was moved, renamed or cloned on another machine: the
-// next start replaces the old glob instead of failing with
-// ERR_PNPM_WORKSPACE_PKG_NOT_FOUND. Unrelated globs (packages/*, apps/*) are kept.
+// Older builds declared managed siblings as `workspace:*` devDependencies and
+// pointed one glob in <profile>/pnpm-workspace.yaml at this repository. pnpm
+// refuses workspace members that live under node_modules, so a git-installed
+// manager could never resolve them (ERR_PNPM_WORKSPACE_PKG_NOT_FOUND). Sibling
+// specs are now relative `link:` paths (see linkDepSpec in host-core) and the
+// anchor is retired: a glob that still points at this repository's shape is
+// stripped so the stale entry cannot break the next install. Unrelated globs
+// (packages/*, apps/*) are kept, and an already clean file is never rewritten.
 
 /** Read the profile's pnpm-workspace.yaml (missing/unreadable → empty document). */
 function readWorkspaceDoc(c) {
@@ -403,7 +402,7 @@ function readWorkspaceDoc(c) {
   }
 }
 
-/** Anchor snapshot: parsed document + evaluated state (no writes). */
+/** Anchor snapshot: parsed document + evaluated retirement state (no writes). */
 function workspaceSnapshot(c) {
   const read = readWorkspaceDoc(c)
   const state = workspaceStateOf(read.doc, c.repoRoot)
@@ -411,29 +410,29 @@ function workspaceSnapshot(c) {
 }
 
 /**
- * 功能作用：确保 profile 的 pnpm-workspace.yaml 放行本仓库插件目录——幂等，已就绪时零写入；
- *           需要补写或替换旧位置 glob 时先备份再整体重写（YAML 注释不会保留，故只在必要时写）。
+ * 功能作用：清理 profile 的 pnpm-workspace.yaml 里指向本仓库的残留 workspace 锚点——幂等，
+ *           已干净时零写入；需要删条目时先备份再整体重写（YAML 注释不会保留，故只在必要时写）。
  * 参数：c: object -- resolveContext() 的结果（用到 workspaceFile / profileDir / repoRoot）
- * 返回值：{ changed, error, glob, backup, staleGlobs }
+ * 返回值：{ changed, error, glob, backup, removed }
  */
-function ensureWorkspaceGlob(c) {
+function ensureWorkspaceRetired(c) {
   const snap = workspaceSnapshot(c)
   const glob = snap.state.glob
-  if (!snap.engine) return { changed: false, error: snap.error, glob, backup: null, staleGlobs: snap.state.staleGlobs }
-  const next = upsertWorkspaceGlob(snap.doc, c.repoRoot)
-  HOST_DIAG.workspace = { file: c.workspaceFile, glob, ok: next.state.ok, staleGlobs: next.state.staleGlobs }
-  if (!next.changed) return { changed: false, error: null, glob, backup: null, staleGlobs: next.state.staleGlobs }
+  if (!snap.engine) return { changed: false, error: snap.error, glob, backup: null, removed: [] }
+  const next = retireWorkspaceGlob(snap.doc, c.repoRoot)
+  HOST_DIAG.workspace = { file: c.workspaceFile, glob, ok: next.state.ok, repoGlobs: next.state.repoGlobs }
+  if (!next.changed) return { changed: false, error: null, glob, backup: null, removed: [] }
   let backup = null
   try { if (fs.existsSync(c.workspaceFile)) backup = backupFile(c.workspaceFile) } catch { backup = null }
   try {
     fs.mkdirSync(path.dirname(c.workspaceFile), { recursive: true })
     fs.writeFileSync(c.workspaceFile, snap.engine.dumpDoc(next.doc), 'utf8')
   } catch (e) {
-    return { changed: false, error: `写入 ${WORKSPACE_FILE} 失败：${(e && e.message) || e}`, glob, backup, staleGlobs: snap.state.staleGlobs }
+    return { changed: false, error: `写入 ${WORKSPACE_FILE} 失败：${(e && e.message) || e}`, glob, backup, removed: [] }
   }
-  HOST_DIAG.workspaceRepair = { at: Date.now(), glob, replaced: next.state.staleGlobs, backup }
-  HOST_DIAG.workspace = { file: c.workspaceFile, glob, ok: true, staleGlobs: [] }
-  return { changed: true, error: null, glob, backup, staleGlobs: next.state.staleGlobs }
+  HOST_DIAG.workspaceRepair = { at: Date.now(), removed: next.removed, backup }
+  HOST_DIAG.workspace = { file: c.workspaceFile, glob, ok: true, repoGlobs: [] }
+  return { changed: true, error: null, glob, backup, removed: next.removed }
 }
 
 // --- pending switch intents (debounced patch writes) -------------------------
@@ -534,7 +533,7 @@ function snapshot(ctx, config, extraIntents) {
   // state (the flush makes them durable a few hundred ms later).
   const intents = Array.isArray(extraIntents) ? extraIntents : pendingIntents
   const wsSnap = workspaceSnapshot(c)
-  const derived = deriveStates({ repoPlugins: plugins, manifest, rows: applyIntents(rows, intents), workspace: wsSnap.state })
+  const derived = deriveStates({ repoPlugins: plugins, manifest, rows: applyIntents(rows, intents), profileDir: c.profileDir })
   const legacyDetected = derived.some((p) => p.legacyBundle)
   return { c, manifest, rows, plugins, derived, legacyDetected, yamlError: yaml.error, workspace: wsSnap }
 }
@@ -628,14 +627,14 @@ function listPayload(s) {
         const plan = repairPlan(s.derived)
         return { count: plan.count, manualCount: plan.manualCount, auto: plan.auto, manual: plan.manual }
       })(),
-      // The workspace anchor this profile relies on (one glob, no per-plugin path).
+      // Retired workspace anchor: a glob left over from older builds must be gone.
       workspace: s.workspace ? {
         file: s.workspace.state.file,
         path: s.c.workspaceFile,
         glob: s.workspace.state.glob,
         ok: s.workspace.state.ok,
         packages: s.workspace.state.packages,
-        staleGlobs: s.workspace.state.staleGlobs,
+        repoGlobs: s.workspace.state.repoGlobs,
         error: s.workspace.error || null,
       } : null,
       autoRelink: HOST_DIAG.autoRelink,
@@ -652,21 +651,25 @@ function listPayload(s) {
 
 // --- actions -----------------------------------------------------------------
 
-async function ensureDevDep(c, pkgName) {
+async function ensureDevDep(c, meta) {
   const manifest = readManifest(c.manifestFile)
-  const inDeps = Object.prototype.hasOwnProperty.call(manifest.dependencies || {}, pkgName)
-  const spec = (manifest.devDependencies || {})[pkgName]
-  // 就位 = profile 用的是 workspace 协议 且 锚点已放行本仓库：只要还有遗留的 link: 绝对路径规格，
-  // 就改写它（这就是老 profile 从「路径」迁到「workspace 协议」的那一步）。
-  const ready = !inDeps && isWorkspaceSpec(spec)
-  const ws = ensureWorkspaceGlob(c)
+  const inDeps = Object.prototype.hasOwnProperty.call(manifest.dependencies || {}, meta.name)
+  const spec = (manifest.devDependencies || {})[meta.name]
+  const expected = linkDepSpec(c.profileDir, meta)
+  // 就位 = profile 的 devDependency 恰好是期望的相对 link: 规格；旧的 workspace:* 键和遗留的
+  // 绝对 link: 规格都会被改写成它（这就是老 profile 迁到相对规格的那一步）。
+  const ready = !inDeps && expected !== null && spec === expected
+  const ws = ensureWorkspaceRetired(c)
   if (ws.error) return { installed: false, ranPnpm: false, error: ws.error, glob: ws.glob }
   if (ready && !ws.changed) return { installed: true, ranPnpm: false, error: null, glob: ws.glob }
+  if (expected === null) {
+    return { installed: false, ranPnpm: false, error: `无法为 ${meta.name} 生成依赖规格：插件目录缺失`, glob: ws.glob }
+  }
   const backup = backupFile(c.manifestFile)
   const manifest2 = { ...manifest }
   manifest2.dependencies = { ...(manifest.dependencies || {}) }
-  delete manifest2.dependencies[pkgName]
-  manifest2.devDependencies = { ...(manifest.devDependencies || {}), [pkgName]: WORKSPACE_SPEC }
+  delete manifest2.dependencies[meta.name]
+  manifest2.devDependencies = { ...(manifest.devDependencies || {}), [meta.name]: expected }
   writeJsonPretty(c.manifestFile, manifest2)
   const res = await pnpmRunner(c.profileDir, ['install'])
   if (!res.ok) {
@@ -676,30 +679,24 @@ async function ensureDevDep(c, pkgName) {
   return { installed: true, ranPnpm: true, error: null, backup, glob: ws.glob, workspaceChanged: ws.changed }
 }
 /**
- * 功能作用：批量确保多个子插件可解析——先把 workspace 锚点（pnpm-workspace.yaml 的插件目录 glob）
- *           补齐/修正到位，再把缺失或仍是遗留绝对路径规格的 devDependency 一次性写成 workspace:*，
+ * 功能作用：批量确保多个子插件可解析——先清掉 profile 里指向本仓库的残留 workspace 锚点，
+ *           再把缺失或仍是旧协议的 devDependency 一次性写成期望的相对 link: 规格，
  *           然后只执行一次 pnpm install（批量开启时用；逐项安装会 N 次改写 + N 次安装，慢且没必要）。
  * 参数：
  *   c: object -- resolveContext() 的结果（用到 manifestFile / profileDir / repoRoot / workspaceFile）
- *   entries: Array -- [{ name }]，例如 [{ name: 'dsh-esc-rewind' }]
+ *   entries: Array -- [{ name, dir, dirPath }]，例如 [{ name: 'dsh-esc-rewind', dir: 'dsh-esc-rewind' }]
  * 返回值：
  *   { installed: string[], failed: [{ name, error }], ranPnpm: boolean, backup: string|null, workspaceChanged: boolean }
- *   例：{ installed: ['dsh-aaa'], failed: [], ranPnpm: true, backup: '.../package.json.bak-...', workspaceChanged: true }
+ *   例：{ installed: ['dsh-aaa'], failed: [], ranPnpm: true, backup: '.../package.json.bak-...', workspaceChanged: false }
  * 调用样例：
- *   const ins = await ensureDevDeps(c, needInstall.map((t) => ({ name: t.name })))
+ *   const ins = await ensureDevDeps(c, needInstall.map((t) => ({ name: t.name, dir: t.dir })))
  */
 async function ensureDevDeps(c, entries) {
   const wanted = (Array.isArray(entries) ? entries : []).filter((e) => e && e.name)
-  const ws = ensureWorkspaceGlob(c)
+  const expectedOf = (e) => linkDepSpec(c.profileDir, { name: e.name, dir: e.dir, dirPath: e.dirPath })
+  const ws = ensureWorkspaceRetired(c)
   if (ws.error) {
     return { installed: [], failed: wanted.map((e) => ({ name: e.name, error: ws.error })), ranPnpm: false, backup: null, workspaceChanged: false }
-  }
-  if (wanted.length === 0 && !ws.changed) return { installed: [], failed: [], ranPnpm: false, backup: null, workspaceChanged: false }
-  if (wanted.length === 0) {
-    // 锚点刚被修好，即使没有目标包也要跑一次，让 pnpm 按新 glob 重建解析。
-    const res = await pnpmRunner(c.profileDir, ['install'])
-    const failed = res.ok ? [] : [{ name: WORKSPACE_FILE, error: res.error || 'pnpm install failed' }]
-    return { installed: [], failed, ranPnpm: true, backup: null, workspaceChanged: true }
   }
 
   const manifest = readManifest(c.manifestFile)
@@ -708,20 +705,26 @@ async function ensureDevDeps(c, entries) {
   next.devDependencies = { ...(manifest.devDependencies || {}) }
   const changed = []
   for (const e of wanted) {
-    const already = isWorkspaceSpec(next.devDependencies[e.name])
+    const expected = expectedOf(e)
+    if (!expected) continue
+    const already = next.devDependencies[e.name] === expected
       && !Object.prototype.hasOwnProperty.call(next.dependencies, e.name)
     if (already) continue
     delete next.dependencies[e.name]
-    next.devDependencies[e.name] = WORKSPACE_SPEC
+    next.devDependencies[e.name] = expected
     changed.push(e.name)
   }
   // 依赖键都已就位、锚点也没动过 → 无需改写也无需安装，直接视为可解析。
   if (changed.length === 0 && !ws.changed) {
     return { installed: wanted.map((e) => e.name), failed: [], ranPnpm: false, backup: null, workspaceChanged: false }
   }
+  // 只清理了残留锚点、没有依赖要写：不跑 install（缺锚点时旧协议键本来就装不回来）。
+  if (changed.length === 0) {
+    return { installed: wanted.map((e) => e.name), failed: [], ranPnpm: false, backup: null, workspaceChanged: true }
+  }
 
   const backup = backupFile(c.manifestFile)
-  if (changed.length > 0) writeJsonPretty(c.manifestFile, next)
+  writeJsonPretty(c.manifestFile, next)
   const res = await pnpmRunner(c.profileDir, ['install'])
   if (!res.ok) {
     try { fs.copyFileSync(backup, c.manifestFile) } catch { /* best effort */ }
@@ -876,7 +879,7 @@ function registerHttp(ctx, host, config) {
           const failedInstall = new Map()
           let ranPnpm = false
           if (needInstall.length > 0) {
-            const ins = await ensureDevDeps(c, needInstall.map((t) => ({ name: t.name, dirPath: t.dirPath })))
+            const ins = await ensureDevDeps(c, needInstall.map((t) => ({ name: t.name, dir: t.dir, dirPath: t.dirPath })))
             ranPnpm = ins.ranPnpm
             for (const f of ins.failed) failedInstall.set(f.name, f.error)
           }
@@ -1088,12 +1091,12 @@ function registerHttp(ctx, host, config) {
               const check = readManifest(c.manifestFile)
               const inDeps = Object.prototype.hasOwnProperty.call(check.dependencies || {}, meta.name)
               const devSpec = (check.devDependencies || {})[meta.name]
-              const anchorOk = Boolean(s.workspace && s.workspace.state && s.workspace.state.ok === true)
-              // 键在 ≠ 就位：规格仍是遗留 link:、或 workspace 锚点缺失时同样要修；
-              // 只有「workspace 协议 + 锚点就绪」才跳过安装。
-              const ready = !inDeps && isWorkspaceSpec(devSpec) && anchorOk
+              const expectedSpec = linkDepSpec(c.profileDir, meta)
+              // 键在 ≠ 就位：规格仍是旧协议（workspace:* 或绝对 link:）时同样要修；
+              // 只有「devDependency 恰好是期望的相对 link: 规格」才跳过安装。
+              const ready = !inDeps && expectedSpec !== null && devSpec === expectedSpec
               if (!ready) {
-                const ins = await ensureDevDep(c, meta.name)
+                const ins = await ensureDevDep(c, meta)
                 if (!ins.installed) {
                   sendJson(res, 500, { ok: false, error: `install ${meta.name} failed: ${ins.error || 'unknown'}` })
                   return
@@ -1141,7 +1144,7 @@ function registerHttp(ctx, host, config) {
             sendJson(res, 200, { ...listPayload(snapshot(ctx, __cfg)), relink: { noop: true, relinked: [], ranPnpm: false, manualCount: plan.manualCount } })
             return
           }
-          const ins = await ensureDevDeps(s0.c, wanted.map((p) => ({ name: p.name, dirPath: p.dirPath })))
+          const ins = await ensureDevDeps(s0.c, wanted.map((p) => ({ name: p.name, dir: p.dir, dirPath: p.dirPath })))
           const ok = ins.failed.length === 0
           HOST_DIAG.lastRelink = {
             at: Date.now(),
@@ -1172,6 +1175,7 @@ function registerHttp(ctx, host, config) {
           manifest: s.manifest,
           rows: s.rows,
           repoRoot: c.repoRoot,
+          profileDir: c.profileDir,
           workspace: s.workspace ? s.workspace.doc : {},
         })
         if (!plan.needsMigration) {
@@ -1250,13 +1254,13 @@ async function autoRelinkOnce(ctx, cfg) {
   try {
     const s = snapshot(ctx, cfg)
     const plan = repairPlan(s.derived)
-    const anchorOk = Boolean(s.workspace && s.workspace.state && s.workspace.state.ok === true)
-    // 无事可做 = 没有待修依赖 且 workspace 锚点已就位；锚点缺失本身也要修一次（迁移后自愈）。
-    if (plan.count === 0 && anchorOk) {
+    const anchorClean = Boolean(s.workspace && s.workspace.state && s.workspace.state.repoGlobs.length === 0)
+    // 无事可做 = 没有待修依赖 且 没有残留 workspace 锚点；有残留也要清一次（老 profile 自愈）。
+    if (plan.count === 0 && anchorClean) {
       HOST_DIAG.autoRelink = { at: Date.now(), relinked: [], ranPnpm: false, manualCount: plan.manualCount, workspaceOk: true }
       return
     }
-    const ins = await ensureDevDeps(s.c, plan.auto.map((p) => ({ name: p.name, dirPath: p.dirPath })))
+    const ins = await ensureDevDeps(s.c, plan.auto.map((p) => ({ name: p.name, dir: p.dir, dirPath: p.dirPath })))
     HOST_DIAG.autoRelink = {
       at: Date.now(),
       relinked: ins.installed,
@@ -1278,7 +1282,7 @@ function apply(ctx, config = {}) {
   HOST_DIAG.profileName = c0.profileName
   HOST_DIAG.repoRoot = c0.repoRoot
   const ws0 = workspaceSnapshot(c0)
-  HOST_DIAG.workspace = { file: c0.workspaceFile, glob: ws0.state.glob, ok: ws0.state.ok, staleGlobs: ws0.state.staleGlobs }
+  HOST_DIAG.workspace = { file: c0.workspaceFile, glob: ws0.state.glob, ok: ws0.state.ok, repoGlobs: ws0.state.repoGlobs }
   // 0.2.0：条目 Config 里的开关值（0.1.x 的行没有 config，此分支不生效，仍走 installSection）。
   if (config && typeof config[AUTO_RELINK_FIELD] === 'boolean') {
     __autoRelink = config[AUTO_RELINK_FIELD] !== false

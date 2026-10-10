@@ -78,7 +78,14 @@ function seedPatch() {
 
 // js-yaml via junction, mirroring the live profile's hoisted install.
 fs.mkdirSync(path.join(profileDir, 'node_modules'), { recursive: true })
-fs.symlinkSync(realYaml, path.join(profileDir, 'node_modules', 'js-yaml'), 'junction')
+const jsYamlLink = path.join(profileDir, 'node_modules', 'js-yaml')
+try {
+  fs.symlinkSync(realYaml, jsYamlLink, 'junction')
+} catch {
+  // Restricted Windows shells refuse junction creation (EPERM); a plain copy
+  // keeps the throwaway profile resolvable and never touches the real profile.
+  fs.cpSync(realYaml, jsYamlLink, { recursive: true })
+}
 
 const probe = createRequire(path.join(profileDir, 'package.json'))
 try {

@@ -1,6 +1,26 @@
 # plugin-manager Specification
 
-> ### ⚠️ 2026-10-09 变更（A15）：依赖声明改用 pnpm workspace 协议
+> ### ⚠️ 2026-10-10 变更（A16）：依赖声明改用相对 `link:`，workspace 锚点退役
+>
+> 自本日起，下文所有「在 profile devDependencies 写入 `link:<子插件的绝对目录>`」以**及** 2026-10-09 的
+> 「`workspace:*` + `pnpm-workspace.yaml` 锚点」读法一律作废。实际写入的是
+> **`"<name>": "link:./node_modules/dsh-plugin-manager/sub-plugins/<dir>"`**（相对 profile 目录，指向 profile 里
+> 那份管理器拷贝，不含盘符/用户名/仓库绝对路径）；只有该镜像目录不可达时才退回 `link:<子插件的绝对目录>`
+> （`linkDepSpec(profileDir, meta, io)`）。原因：git 快照安装时锚点 glob 落在 `<profile>/node_modules/…` 之下，
+> pnpm 枚举 workspace 成员时跳过 `node_modules` 内路径 → `workspace:*` 全部 `ERR_PNPM_WORKSPACE_PKG_NOT_FOUND`。
+>
+> 连带变化（逐条规格文本随下一次 openspec 归档一并更新）：
+>
+> - 锚点退役：`workspaceStateOf()` / `upsertWorkspaceGlob()` / `WORKSPACE_SPEC` / `workspaceDepSpec()` 删除；只保留**残留清理**
+>   `retireWorkspaceGlob(doc, repoRoot)`（形状匹配本仓库的 glob 被删，干净文档 `changed=false` 零写入，幂等）。
+> - 状态词表：`fresh` = 规格与期望**全等**；`stale-mismatch` = 规格不是期望形态（旧 `workspace:*`、遗留绝对 `link:`、版本号、`file:`，或期望无法推导）；
+>   `stale-target-missing` **不再产生**（锚点已退役）；`stale-unresolved` = 规格对但目标目录不存在；`unknown` = IO 失败。
+> - 新增：`LINK_PROTOCOL`、`mirrorDirOf()`、`linkDepSpec()`、`retireWorkspaceGlob()`；`staleDepSpec(manifest, meta, expected)` 改为三参。
+> - 卸载范围：受管依赖键按**包名**识别（相对 `link:` 不含仓库路径），并额外摘掉 `pnpm-workspace.yaml` 里残留的本仓库那条 glob。
+> - 失败文案：`execPnpm` 在 stderr 为空时回退 stdout（pnpm 的 `ERR_PNPM_*` 写在 stdout，原先被吞成 `pnpm install failed`）。
+> - 管理器自身那条 `link:<repo>` 仍属**安装入口**（由 `dsh plugin add` 写入），管理器不自行改写它。
+
+> ### ⚠️ 2026-10-09 变更（A15）：依赖声明改用 pnpm workspace 协议（已于 2026-10-10 被 A16 取代）
 >
 > 自本日起，下文所有「在 profile devDependencies 写入 `link:<子插件的绝对目录>`」一律按下述读：
 > 写入的是 **`"<name>": "workspace:*"`（不含任何路径）**；可解析性由 profile 的 `pnpm-workspace.yaml` 里

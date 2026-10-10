@@ -61,7 +61,14 @@ fs.writeFileSync(patchFile, seedRows(), 'utf8')
 
 // js-yaml via junction, mirroring the live profile's hoisted install.
 fs.mkdirSync(path.join(profileDir, 'node_modules'), { recursive: true })
-fs.symlinkSync(realYaml, path.join(profileDir, 'node_modules', 'js-yaml'), 'junction')
+const jsYamlLink = path.join(profileDir, 'node_modules', 'js-yaml')
+try {
+  fs.symlinkSync(realYaml, jsYamlLink, 'junction')
+} catch {
+  // Restricted Windows shells refuse junction creation (EPERM); a plain copy
+  // keeps the throwaway profile resolvable and never touches the real profile.
+  fs.cpSync(realYaml, jsYamlLink, { recursive: true })
+}
 
 const probe = createRequire(path.join(profileDir, 'package.json'))
 try {
@@ -82,7 +89,6 @@ const {
   __autoRelinkOnce,
   HOST_DIAG,
 } = await import(pathToFileURL(indexPath).href)
-const { workspaceDepSpec } = await import(pathToFileURL(path.join(here, '..', 'src', 'host-core.js')).href)
 
 // --- fake web server + req/res ----------------------------------------------
 
@@ -109,6 +115,9 @@ registerHttp(ctx, host, {})
 assert.equal(typeof handler, 'function', 'registerHttp installed a prefix handler')
 
 const repoRoot = path.join(here, '..', '..')
+// The temp profile has no node_modules mirror of the manager, so the expected
+// spec is the absolute fallback form of this repo's plugin dir (forward slashes).
+const expectedSpecOf = (dir) => 'link:' + path.join(repoRoot, 'sub-plugins', dir).split(path.sep).join('/')
 const manifestPath = path.join(profileDir, 'package.json')
 const manifest = () => JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
 const writeManifest = (m) => fs.writeFileSync(manifestPath, `${JSON.stringify(m, null, 2)}\n`, 'utf8')
@@ -216,7 +225,7 @@ try {
   // --- 陈旧链接：单行启用时修复（恰好一次 install） --------------------------
   {
     const dir = ROWS[1]
-    const currentSpec = workspaceDepSpec(path.join(repoRoot, 'sub-plugins', dir))
+    const currentSpec = expectedSpecOf(dir)
     fs.writeFileSync(patchFile, seedRows(), 'utf8')
     const m = manifest()
     m.devDependencies[dir] = `link:D:/gone/${dir}`
@@ -226,7 +235,7 @@ try {
     assert.equal(res.status, 200)
     await sleep(150)
     assert.equal(installs, 1, '陈旧链接被修复时恰好一次 pnpm install')
-    assert.equal(manifest().devDependencies[dir], currentSpec, 'link: 被改写为当前实际目录')
+    assert.equal(manifest().devDependencies[dir], currentSpec, 'link: 被改写为该插件的实际目录（临时 profile 无镜像 → 绝对回退）')
     const listed = (res.json.data.plugins || []).find((p) => p.dir === dir)
     assert.equal(listed.depState, 'fresh', '响应里的链接态已回到 fresh')
   }
@@ -252,9 +261,9 @@ try {
     assert.equal(installs, 1, '重定位两个条目只跑一次 install')
     assert.equal(res.json.relink.relinked.length, 2)
     for (const dir of ROWS) {
-      assert.equal(manifest().devDependencies[dir], workspaceDepSpec(path.join(repoRoot, 'sub-plugins', dir)))
+      assert.equal(manifest().devDependencies[dir], expectedSpecOf(dir))
     }
-    assert.equal(res.json.data.linkPlan.count, 0, '修完后面板不再报陈旧')
+    assert.equal(res.json.data.repairPlan.count, 0, '修完后面板不再报陈旧')
     const again = await call('POST', URL_('relink'), {})
     assert.equal(again.status, 200)
     assert.equal(again.json.relink.noop, true, '没有陈旧项时是 noop')

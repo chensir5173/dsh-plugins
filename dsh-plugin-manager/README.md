@@ -20,11 +20,11 @@ dsh plugin --profile web add git+https://github.com/Chen5173/dsh-plugins.git
 - **启用**：自动补依赖并写入激活行，宿主侧即时生效。
 - **停用**：保留激活行与依赖，只是关掉，随时可再开。
 - **移除**：删激活行 + 摘依赖；仓库里的源码目录保留，之后可再启用。
-- **依赖自愈（默认开）**：子插件的依赖写成 **pnpm workspace 协议** `"<name>": "workspace:*"`（**不含任何路径**），由 profile 的 `pnpm-workspace.yaml` 里**唯一一条** glob（指向本仓库插件目录 `<repo>/sub-plugins/*`）放行。换机器 / 换 `DSH_HOME` / 换仓库目录后，宿主加载时会**只读检测**锚点与规格（`fresh` / `陈旧：仍是遗留 link: 绝对路径` / `陈旧：锚点缺失或指向旧位置` / `无法确定`）；对**能确定**的项自动补齐或改写 glob、把遗留的 `link:` 规格改写成 `workspace:*`，并只跑**一次** `pnpm install`（**每次宿主启动最多一次**，写前留 `*.bak-<ts>` 备份），确定不了的只在面板横幅里列为「需人工处理」——**绝不猜路径**。面板顶部横幅给出计数、逐条「声明 → 期望」与「修复依赖」按钮；开关在设置页的 `dsh-plugin-manager` 段（字段 `autoRelink`，默认开，关掉后只检测与提示）。
-- **启用即自愈**：单行「开启」与「全部开启」在依赖仍是遗留 `link:` 规格、或 workspace 锚点缺失时同样会改写（不再是"键在就信任"）。
+- **依赖自愈（默认开）**：子插件的依赖写成**相对本 profile 的 `link:` 规格** `"<name>": "link:./node_modules/dsh-plugin-manager/sub-plugins/<dir>"`——它指向 profile 里那份管理器拷贝，所以**不含盘符、用户名或仓库绝对路径**；只有当 profile 里那份拷贝不可达（例如刚做完本地检出、还没落盘）时才退回 `link:<插件绝对目录>`。换机器 / 换 `DSH_HOME` / 换仓库目录后，宿主加载时会**只读检测**规格（`fresh` / `陈旧：规格不是当前形态（旧 workspace:* 键、绝对 link:、版本号…）` / `陈旧：规格指向的目录不存在` / `无法确定`）；对**能确定**的项自动改写规格，并只跑**一次** `pnpm install`（**每次宿主启动最多一次**，写前留 `*.bak-<ts>` 备份），确定不了的只在面板横幅里列为「需人工处理」——**绝不猜路径**。面板顶部横幅给出计数、逐条「声明 → 期望」与「修复依赖」按钮；开关在设置页的 `dsh-plugin-manager` 段（字段 `autoRelink`，默认开，关掉后只检测与提示）。
+- **启用即自愈**：单行「开启」与「全部开启」在依赖仍是旧写法（遗留的 `workspace:*` 键、绝对 `link:` 规格）时同样会改写（不再是"键在就信任"）。
 - **带界面的子插件**其客户端 UI 只在**一次页面刷新**后进/出。面板开关后会提示并给出刷新按钮，**不会自动刷新**。
 - **批量按钮**上的数字 = 这一步真能改动的插件数（为 0 时置灰）。「全部开启」处理 `已停用` 与 `未激活`；「全部关闭」处理 `已激活`；「全部移除」处理**在 profile 里留下痕迹的**那些（`已激活`、`已停用`、`未激活(仅依赖)`）。`未安装`（对移除而言）、`旧布局`、`非插件目录` 一律跳过（旧布局请先迁移，确认框与结果里会点明跳过了几个）。批量只作用于面板列出的受管子插件，profile 里其它插件的行（`mcp-*`、`dsh-liquid-glass` …）一行都不碰。
-- **全部移除**：一次删掉全部受管子插件的激活行与 devDependencies 键，只跑一次 `pnpm install`；源码目录保留，之后可逐个重新启用。它是**破坏性**动作，插件会立刻停止运行——**迁移过 profile / 换过机器**时这正是清掉旧依赖痕迹的办法：先「全部移除」，再按需「全部开启」或逐个启用，管理器就会按 `workspace:*` + 当前仓库的 workspace 锚点重新声明。执行时仍在 400 ms 合并窗口里的开关点击会随行作废（结果提示会说明作废了几次）。
+- **全部移除**：一次删掉全部受管子插件的激活行与 devDependencies 键，只跑一次 `pnpm install`；源码目录保留，之后可逐个重新启用。它是**破坏性**动作，插件会立刻停止运行——**迁移过 profile / 换过机器**时这正是清掉旧依赖痕迹的办法：先「全部移除」，再按需「全部开启」或逐个启用，管理器就会按当前形态（指向本 profile 拷贝的相对 `link:` 规格）重新声明。执行时仍在 400 ms 合并窗口里的开关点击会随行作废（结果提示会说明作废了几次）。
 - **失败逐项回报**：批量中某项失败只影响该项（原因可见、状态不变、可重试），其余照常生效，提示条逐条列出。
 - **执行期锁定**：批量进行中（可能正在装依赖）所有开关、移除与「一键迁移」都禁用并显示「处理中…」。
 - **连点会合并**：短时间内多次开关只落盘一次。落盘会让核心重应用整棵配置树，界面可能短暂无响应。
@@ -49,7 +49,7 @@ dsh plugin --profile web add git+https://github.com/Chen5173/dsh-plugins.git
 
 ## 它会改动你机器上的什么
 
-- 读写目标 profile 的 `package.json`（`devDependencies`）、`cordis.patch.yml`（激活行）与 `pnpm-workspace.yaml`（**只维护一条指向本仓库插件目录的 glob**，其它 glob 与键一个都不动）；每次改动前生成 `*.bak-<时间戳>` 备份，失败自动回滚。
+- 读写目标 profile 的 `package.json`（`devDependencies`）、`cordis.patch.yml`（激活行）与 `pnpm-workspace.yaml`（**只清理早期版本留下的那条指向本仓库插件目录的 glob**，其它 glob 与键一个都不动；新装的 profile 根本不会有这个文件）；每次改动前生成 `*.bak-<时间戳>` 备份，失败自动回滚。
 - 需要装依赖时在 profile 目录执行 `pnpm install`。
 - YAML 处理用 profile 自带的 `js-yaml`；缺失时自动 `pnpm add -D js-yaml` 一次。
 - 默认管理**当前正在运行的那个 profile**。没有 Web 界面可探测时（例如 headless 宿主）回退到 `$DSH_HOME/profiles/<config.profile || 'web'>` —— 要改这个回退目标，在 `dsh.profile.bundles` 里本插件行加 `config: { profile: '名字' }`。
@@ -61,10 +61,10 @@ dsh plugin --profile web add git+https://github.com/Chen5173/dsh-plugins.git
 
 | 装法 | 子插件的依赖怎么写 | 删管理器之后 |
 |---|---|---|
-| **git 快照**（`dsh plugin add git+https://…`） | profile 的 `pnpm-workspace.yaml` 放行管理器克隆里的 `sub-plugins/*`，包名写 `workspace:*` | 那 7 个子插件的**代码随克隆一起消失**，而激活行、`workspace:*` 键与那条 glob **留在 profile 里** → 下次启动报 `failed to import loader entry …: Cannot find package …` |
-| **本地 `link:`**（`dsh plugin add <仓库根>`） | 锚点放行你的开发仓库 `<repo>/sub-plugins/*`，包名写 `workspace:*` | 依上面那条命令的说明：源码不动；`package.json` 里会留下本仓库插件的 `workspace:*` 键、锚点里也留着那条 glob |
+| **git 快照**（`dsh plugin add git+https://…`） | 包名写成相对 profile 的 `link:./node_modules/dsh-plugin-manager/sub-plugins/<dir>`，指向克隆里那份拷贝 | 那 7 个子插件的**代码随克隆一起消失**，而激活行与这些 `link:` 键**留在 profile 里** → 下次启动报 `failed to import loader entry …: Cannot find package …` |
+| **本地 `link:`**（`dsh plugin add <仓库根>`） | 同上（相对规格指向 profile 里生效的那份拷贝）；仅当 profile 里还没落盘那份拷贝时退回 `link:<开发仓库>/sub-plugins/<dir>` | 依上面那条命令的说明：源码不动；`package.json` 里会留下本仓库插件的 `link:` 键 |
 
-**核心 CLI 帮不了你**：`dsh plugin --profile web remove dsh-plugin-manager` 只是 pnpm 转发 + 只对账 `dsh.profile.bundles`——它**不认识** `cordis.patch.yml` 里由管理器写下的激活行，也**不会**碰子插件的依赖键与 workspace 锚点（核心也没有卸载钩子）。
+**核心 CLI 帮不了你**：`dsh plugin --profile web remove dsh-plugin-manager` 只是 pnpm 转发 + 只对账 `dsh.profile.bundles`——它**不认识** `cordis.patch.yml` 里由管理器写下的激活行，也**不会**碰子插件的依赖键与可能残留的锚点 glob（核心也没有卸载钩子）。
 
 **请用这条一键卸载**（脚本随包分发，不依赖 DSH 宿主与 `dsh` CLI）：
 
@@ -74,7 +74,7 @@ node "<面板里「复制卸载命令」复制到的那条命令>"   # 面板已
 node "~/.dsh/profiles/web/node_modules/dsh-plugin-manager/dsh-plugin-manager/tools/uninstall-manager.mjs" --profile web --yes
 ```
 
-它一次做完：删除全部受管子插件的激活行与指向本仓库的依赖键 → 从 `pnpm-workspace.yaml` 摘掉本仓库那条 glob → 删除管理器自身的依赖键与 `dsh.profile.bundles` 条目 → 跑**一次** `pnpm install`。改到的 profile 文件写前各留一份 `*.bak-<ts>`；**不删任何源码目录**；重复执行是 noop。默认**干跑**（只打印将删除什么），`--yes` 才真删——所以面板只提供「复制命令」，不会替你执行。
+它一次做完：删除全部受管子插件的激活行与指向本仓库的依赖键 → 从 `pnpm-workspace.yaml` 摘掉早期版本留下的那条 glob（若还在）→ 删除管理器自身的依赖键与 `dsh.profile.bundles` 条目 → 跑**一次** `pnpm install`。改到的 profile 文件写前各留一份 `*.bak-<ts>`；**不删任何源码目录**；重复执行是 noop。默认**干跑**（只打印将删除什么），`--yes` 才真删——所以面板只提供「复制命令」，不会替你执行。
 
 失败降级：若最后一步 `pnpm install` 失败（Windows 上删脚本自身所在目录偶发 EBUSY），行与键**已经清干净**，按它打印的 `pnpm install --dir "<profile>"` 重跑一次即可收尾。
 
@@ -85,7 +85,7 @@ node "~/.dsh/profiles/web/node_modules/dsh-plugin-manager/dsh-plugin-manager/too
 ## 版本要求
 
 - Node ≥ 20（`package.json` 的 `engines`）。
-- 宿主：profile 顶层能解析 `js-yaml`（web profile 已具备），并由 pnpm 管理（管理器会维护 `pnpm-workspace.yaml` 的锚点 glob）。
+- 宿主：profile 顶层能解析 `js-yaml`（web profile 已具备），并由 pnpm 管理（**不需要** `pnpm-workspace.yaml` 锚点；早期版本留下的那条 glob 会被自动清掉）。
 - 浏览器：需要核心提供 `react` 模块字与 `settings.localPlugins.tab` 槽（旧核心没有该槽时面板不出现，但管理器宿主机能照常工作）。客户端不依赖任何 `@deepseek-ai/*` 宿主包。
 - 宿主半导出 `Config`（`autoRelink`）：0.2.0 退役了 `settings.installSection`，设置命名空间改为「profile 条目 id 的 Config」——本包因此在设置页出现「自动修复依赖」开关；0.1.x 仍走 installSection。
 
