@@ -43,13 +43,14 @@ dsh plugin --profile web add git+https://github.com/Chen5173/dsh-plugins.git
 
 要新退役一个子插件，**往那份数组加名字**（连日期与理由一起写），而不是删目录；要它重新回到面板，把名字从数组里删掉即可——目录与依赖声明都还在。
 
-> 已退役但仍在运行中的实例：如果它退役**之前**已经激活在 profile 里，退役**不会**自动摘掉那行 —— 先按它的 README/history 在面板里「移除」（若那时面板还列着它），或手工删掉 profile `cordis.patch.yml` 的对应 `- insert:` 行与 `package.json` 的 devDependency 后再 `pnpm install`。
+> **已退役实例的存量清理（0.3.12 起自动）**：退役前已激活过的 profile 会留三种残留——`cordis.patch.yml` 的激活行（DSH 插件列表里那个「幽灵条目」）、`package.json` 的依赖键、`node_modules/<包名>` 的链接点。宿主每次启动会自动清一次（也挂在每次安装/迁移之前）：先快照、真有残留才先备份再改写，干净时零写入；键清掉**不跑** pnpm（下次任何 install 自然同步），`node_modules` 只删**链接点**（symlink / junction / 断链），真实目录与管理器自己的 `sub-plugins` 镜像绝不动。清理结果记在 `/status` 的 `hostDiag.retiredSweep`。
 >
-> 本次退役的 `dsh-hindsight-model` 退役前在 desktop profile 里是**激活**的：已把 `- id: hindsight-model` 那一行改成 `disabled: true`（**保留激活行与依赖，只关掉**），所以功能随下一次 DSH 启动停止。恢复 = 删掉那个字段（要让面板重新列出它，还得把名字从 `RETIRED_PLUGIN_DIRS` 里删掉）。
+> 历史：`dsh-hindsight-model`（2026-10-10 desktop profile）是唯一一次手动收尾——当时管理器还带不动清理，靠手工删行；此后同类问题不再需要人工。恢复一个退役插件 = 把名字从 `RETIRED_PLUGIN_DIRS` 删掉 + 重新点开它（清理只会删 retired 名单里的行）。
 
 ## 它会改动你机器上的什么
 
 - 读写目标 profile 的 `package.json`（`devDependencies`）、`cordis.patch.yml`（激活行）与 `pnpm-workspace.yaml`（**只清理早期版本留下的那条指向本仓库插件目录的 glob**，其它 glob 与键一个都不动；新装的 profile 根本不会有这个文件）；每次改动前生成 `*.bak-<时间戳>` 备份，失败自动回滚。
+- 退役插件的存量清理：摘掉 `RETIRED_PLUGIN_DIRS` 名单内插件的 `cordis.patch.yml` 激活行、`package.json` 依赖键（不跑 pnpm）与 `node_modules/<包名>` **链接点**（junction/symlink/断链，真实目录绝不动），详见上文「退役的子插件」小节。
 - 需要装依赖时在 profile 目录执行 `pnpm install`。
 - YAML 处理用 profile 自带的 `js-yaml`；缺失时自动 `pnpm add -D js-yaml` 一次。
 - 默认管理**当前正在运行的那个 profile**。没有 Web 界面可探测时（例如 headless 宿主）回退到 `$DSH_HOME/profiles/<config.profile || 'web'>` —— 要改这个回退目标，在 `dsh.profile.bundles` 里本插件行加 `config: { profile: '名字' }`。

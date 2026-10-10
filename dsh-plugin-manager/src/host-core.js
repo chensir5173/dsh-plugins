@@ -575,6 +575,66 @@ export function removeManaged(rows, id) {
 }
 
 /**
+ * 功能作用：retired 插件的激活行 id 清单（由 RETIRED_PLUGIN_DIRS 派生，与目录清单永不失同步）。
+ * 返回值：string[] -- 例 ['open-session-workdir', 'hindsight-model']
+ * 调用样例：retiredRowIds().includes('hindsight-model') === true
+ */
+export function retiredRowIds() {
+  return RETIRED_PLUGIN_DIRS.map(rowIdOfDir)
+}
+
+/**
+ * 功能作用：清掉 patch 行数组里所有 retired 插件的激活行（insert 项与 override 行——复用
+ *           removeManaged 的既有语义：空 insert 行整行删除）。
+ * 参数：rows: Array -- 已解析的 cordis.patch.yml 行，例 [{ insert: [{ id: 'hindsight-model', name: 'dsh-hindsight-model' }] }]
+ * 返回值：{ rows, removed } -- removed 是实际删掉的行 id 清单；已经干净时 rows 返回原数组引用
+ * 调用样例：const { rows, removed } = stripRetiredPatchRows(readPatchRows(engine, patchFile))
+ */
+export function stripRetiredPatchRows(rows) {
+  let out = Array.isArray(rows) ? rows : []
+  const removed = []
+  for (const id of retiredRowIds()) {
+    if (!findRow(out, id)) continue
+    out = removeManaged(out, id)
+    removed.push(id)
+  }
+  return { rows: out, removed }
+}
+
+/**
+ * 功能作用：删掉 profile package.json 里 retired 插件残留的依赖键（dependencies 与
+ *           devDependencies 都检查；返回的新对象不改入参）。
+ * 参数：manifest: object -- readManifest 的结果（文件缺失时是 {}）
+ *       names?: string[] -- 要清的包名清单；默认 RETIRED_PLUGIN_DIRS（目录名即包名）
+ * 返回值：{ manifest, removedKeys } -- removedKeys 非空时 manifest 是改写后的新对象；
+ *         已干净时返回原引用（调用方据此零写入、零备份）
+ * 调用样例：const { manifest, removedKeys } = stripRetiredManifestKeys(readManifest(manifestFile))
+ */
+export function stripRetiredManifestKeys(manifest, names = RETIRED_PLUGIN_DIRS) {
+  const list = Array.isArray(names) ? names : []
+  const hitsOf = (obj) => (obj && typeof obj === 'object'
+    ? list.filter((n) => Object.prototype.hasOwnProperty.call(obj, n))
+    : [])
+  const depHits = hitsOf(manifest && manifest.dependencies)
+  const devHits = hitsOf(manifest && manifest.devDependencies)
+  if (depHits.length === 0 && devHits.length === 0) {
+    return { manifest, removedKeys: [] }
+  }
+  const next = { ...manifest }
+  const removedKeys = []
+  for (const [section, hits] of [['dependencies', depHits], ['devDependencies', devHits]]) {
+    if (hits.length === 0) continue
+    const src = (manifest && manifest[section]) || {}
+    next[section] = { ...src }
+    for (const n of hits) {
+      delete next[section][n]
+      removedKeys.push(n)
+    }
+  }
+  return { manifest: next, removedKeys }
+}
+
+/**
  * Merge one requested switch state into the pending-intent list: intents are
  * keyed by row id, so re-clicking a row replaces its earlier intent instead of
  * queueing a second write. Returns a NEW list; never mutates input.

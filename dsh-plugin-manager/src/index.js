@@ -65,6 +65,9 @@ import {
   writePatchRows,
   removeManaged,
   deriveStates,
+  RETIRED_PLUGIN_DIRS,
+  stripRetiredPatchRows,
+  stripRetiredManifestKeys,
   planMigration,
   linkDepSpec,
   pluginsGlobOf,
@@ -106,6 +109,8 @@ export const HOST_DIAG = {
   workspace: null,
   /** Last automatic cleanup of retired workspace globs (null until one happens). */
   workspaceRepair: null,
+  /** Last sweep of retired-plugin residue: patch rows + manifest keys + node_modules links. */
+  retiredSweep: null,
 }
 
 // --- settings: the automatic relink switch (optional capability) -------------
@@ -121,6 +126,12 @@ let __autoRelink = DEFAULT_AUTO_RELINK
 
 /** One-shot latch: at most ONE automatic relink per host start (a failure burns it too). */
 const AUTO_RELINK_LATCH = { done: false }
+
+/**
+ * 一次性闩：每次宿主启动最多执行一次退役存量清理（无 autoRelink 开关——退役残留
+ * 与依赖自愈不同，是纯卫生问题，清一次 = 零后续成本；幂等保证干净时零写入）。
+ */
+const RETIRED_SWEEP_LATCH = { done: false }
 
 /**
  * 功能作用：零依赖的设置段 schema——宿主解析 bundle 的裸 specifier 走插件源码目录，
@@ -435,6 +446,138 @@ function ensureWorkspaceRetired(c) {
   return { changed: true, error: null, glob, backup, removed: next.removed }
 }
 
+// --- retired plugin residue (patch rows + manifest keys + stale links) --------
+//
+// Retiring a plugin (RETIRED_PLUGIN_DIRS in host-core) removes it from the repo
+// scan, but a profile that had it active still carries three kinds of residue:
+// its insert row in cordis.patch.yml (the ghost entry the DSH plugins list
+// shows), its key in package.json dependencies/devDependencies, and the
+// node_modules symlink that key installed. The residue does not break pnpm
+// installs — it only keeps showing the user a plugin that no longer exists — so
+// this sweep keeps ensureWorkspaceRetired's shape (snapshot → strip → write only
+// when something was actually removed, timestamped backup first, idempotent
+// zero-write when clean) but NEVER blocks an install: errors are recorded as
+// diagnostics and the individual steps run best-effort. Manifest keys are
+// removed WITHOUT running pnpm — the next natural install settles node_modules;
+// under node_modules/ only LINK POINTS are deleted (real directories are pnpm's
+// business) and the manager's own sub-plugins mirror is never touched (a
+// junction-linked checkout IS this repository, its retired source is reference
+// material, not residue).
+
+/**
+ * 判定 node_modules 下某条目是否为「可安全删除的链接点」。返回 null（不动）或
+ * 'symlink' | 'broken' | 'junction'（都可用 rmdirSync 只删链接本身）。
+ * 参数：link: string -- node_modules/<pkg> 的绝对路径
+ *       repoTargets: string[] -- 本仓库内该插件可能被链接的源目录（绝对路径）
+ */
+function classifyNodeModulesLink(link, repoTargets) {
+  let st
+  try { st = fs.lstatSync(link) } catch { return null }
+  if (st.isSymbolicLink()) return 'symlink'
+  if (!st.isDirectory()) return null
+  try { fs.statSync(link) } catch { return 'broken' }
+  for (const target of repoTargets || []) {
+    if (!target || path.resolve(link) === path.resolve(target)) continue
+    try {
+      const ts = fs.lstatSync(target)
+      if (ts.dev === st.dev && BigInt(ts.ino) === BigInt(st.ino) && ts.isDirectory()) return 'junction'
+    } catch { /* target 不存在 → 非 junction 指向它 */ }
+  }
+  return null
+}
+
+/**
+ * 功能作用：一次性清掉 profile 里 retired 插件的三种存量残留——cordis.patch.yml 激活行、
+ *           package.json 依赖键、node_modules/<包名> 链接点。幂等：干净时零写入零备份；
+ *           js-yaml 不可用时只跳过 patch 部分，其余清理照做（错误只记录，绝不失败）。
+ * 参数：c: object -- resolveContext() 的结果（用到 patchFile / manifestFile / profileDir）
+ * 返回值：{ changed, error, rows, keys, unlinked, backups }
+ *         例：{ changed: true, error: null, rows: ['hindsight-model'],
+ *               keys: ['dsh-hindsight-model'], unlinked: ['dsh-hindsight-model'],
+ *               backups: ['...\cordis.patch.yml.bak-...'] }
+ * 调用样例：const sweep = ensureRetiredSwept(c)   // 幂等：第二次调用 changed === false
+ */
+export function ensureRetiredSwept(c) {
+  const sweep = { rows: [], keys: [], unlinked: [], backups: [] }
+  const errors = []
+  // 1) patch 行 — 需要 profile 的 js-yaml；引擎不可用只跳过这一步（键与链接照清）。
+  try {
+    const probe = requireProfileYaml(c.profileDir)
+    if (probe.jsyaml) {
+      const engine = makeYamlEngine(probe.jsyaml)
+      const { rows, removed } = stripRetiredPatchRows(readPatchRows(engine, c.patchFile))
+      if (removed.length > 0) {
+        if (fs.existsSync(c.patchFile)) sweep.backups.push(backupFile(c.patchFile))
+        writePatchRows(engine, c.patchFile, rows)
+        sweep.rows = removed
+      }
+    } else {
+      errors.push(`${YAML_PKG} 不可用，跳过 patch 行清理：${probe.error}`)
+    }
+  } catch (e) {
+    errors.push(`清理 patch 激活行失败：${(e && e.message) || e}`)
+  }
+  // 2) manifest 键 — 纯 JSON 读写，不跑 pnpm（下次任何 install 自然同步 node_modules）。
+  try {
+    const { manifest, removedKeys } = stripRetiredManifestKeys(readManifest(c.manifestFile))
+    if (removedKeys.length > 0) {
+      if (fs.existsSync(c.manifestFile)) sweep.backups.push(backupFile(c.manifestFile))
+      writeJsonPretty(c.manifestFile, manifest)
+      sweep.keys = [...new Set(removedKeys)]
+    }
+  } catch (e) {
+    errors.push(`清理 package.json 依赖键失败：${(e && e.message) || e}`)
+  }
+  // 3) node_modules 链接点 — 只删链接本身（symlink/junction），真实目录绝不动。
+  // Windows junction 无法用 isSymbolicLink()/readlinkSync 识别（lstat 直接报告 target 的
+  // dev/ino），所以链接点按三条规则判定：真 symlink；断链（lstat 在而 stat 挂）；
+  // junction 的 dev/ino 与本仓库源目录一致（NTFS 两个路径同 ino = 同一对象 = 链接或
+  // 硬链接，目录硬链接在 Windows 上实际不存在 → 必是 junction）。真实目录 dev/ino
+  // 是自己的，永远不等于仓库源 → 绝不误删。rmdirSync 对 junction 只删链接点。
+  for (const pkg of RETIRED_PLUGIN_DIRS) {
+    const link = path.join(c.profileDir, 'node_modules', pkg)
+    try {
+      const kind = classifyNodeModulesLink(link, [path.join(PLUGINS_ROOT, pkg)])
+      if (kind) {
+        fs.rmdirSync(link)
+        sweep.unlinked.push(pkg)
+      }
+    } catch (e) {
+      if (!e || e.code !== 'ENOENT') errors.push(`删除 ${pkg} 链接点失败：${(e && e.message) || e}`)
+    }
+  }
+  const changed = sweep.rows.length > 0 || sweep.keys.length > 0 || sweep.unlinked.length > 0
+  HOST_DIAG.retiredSweep = {
+    at: Date.now(),
+    changed,
+    rows: sweep.rows,
+    keys: sweep.keys,
+    unlinked: sweep.unlinked,
+    backups: sweep.backups,
+    error: errors.length > 0 ? errors[0] : null,
+    errors: errors.length > 0 ? errors : undefined,
+  }
+  return { changed, error: errors.length > 0 ? errors[0] : null, ...sweep }
+}
+
+/**
+ * 功能作用：宿主启动后的一次性退役存量清理（每次启动最多一次，闩模式；闩在进入时立即
+ *           扣下，失败也不重试）。同步执行——全是本地 fs 读写，没有网络与 pnpm。
+ * 参数：ctx: object -- cordis 上下文（供 resolveContext 解析 profile）
+ *       cfg: object -- 插件配置，例 {}
+ * 返回值：void（结果记入 HOST_DIAG.retiredSweep）
+ * 调用样例：retiredSweepOnce(ctx, config)
+ */
+function retiredSweepOnce(ctx, cfg) {
+  if (RETIRED_SWEEP_LATCH.done) return
+  RETIRED_SWEEP_LATCH.done = true
+  try {
+    ensureRetiredSwept(resolveContext(cfg, ctx && ctx.baseUrl))
+  } catch (e) {
+    HOST_DIAG.retiredSweep = { at: Date.now(), changed: false, rows: [], keys: [], unlinked: [], backups: [], error: (e && e.message) || String(e) }
+  }
+}
+
 // --- pending switch intents (debounced patch writes) -------------------------
 //
 // ONE patch-file write costs DSH core a full config-tree re-application that
@@ -639,6 +782,8 @@ function listPayload(s) {
       } : null,
       autoRelink: HOST_DIAG.autoRelink,
       autoRelinkEnabled: __autoRelink === true,
+      // Retired-residue sweep outcome: { at, changed, rows, keys, unlinked, backups, error }.
+      retiredSweep: HOST_DIAG.retiredSweep,
       // Self-uninstall face: the command the panel offers to copy (never executed
       // here) plus a read-only preview of what it would remove.
       uninstall: {
@@ -652,6 +797,9 @@ function listPayload(s) {
 // --- actions -----------------------------------------------------------------
 
 async function ensureDevDep(c, meta) {
+  // Retired residue FIRST: a key swept from disk must not resurrect through the
+  // manifest copy this function later rewrites, so sweep before reading it.
+  ensureRetiredSwept(c)
   const manifest = readManifest(c.manifestFile)
   const inDeps = Object.prototype.hasOwnProperty.call(manifest.dependencies || {}, meta.name)
   const spec = (manifest.devDependencies || {})[meta.name]
@@ -692,6 +840,8 @@ async function ensureDevDep(c, meta) {
  *   const ins = await ensureDevDeps(c, needInstall.map((t) => ({ name: t.name, dir: t.dir })))
  */
 async function ensureDevDeps(c, entries) {
+  // 退役残留先行（同 ensureDevDep：必须先于 readManifest，键才不会经旧副本复活）。
+  ensureRetiredSwept(c)
   const wanted = (Array.isArray(entries) ? entries : []).filter((e) => e && e.name)
   const expectedOf = (e) => linkDepSpec(c.profileDir, { name: e.name, dir: e.dir, dirPath: e.dirPath })
   const ws = ensureWorkspaceRetired(c)
@@ -1162,8 +1312,10 @@ function registerHttp(ctx, host, config) {
         }
 
         // migrate — settle queued switch intents first so the plan is computed
-        // against the file the user's clicks already asked for.
+        // against the file the user's clicks already asked for. Retired residue
+        // is swept BEFORE the snapshot, so migration plans over clean rows/keys.
         await flushPending(ctx, __cfg)
+        ensureRetiredSwept(resolveContext(__cfg, ctx && ctx.baseUrl))
         const s = snapshot(ctx, __cfg)
         const c = s.c
         const y = await ensureYaml(c.profileDir)
@@ -1227,6 +1379,9 @@ function registerHttp(ctx, host, config) {
     }
   })
   HOST_DIAG.endpointsRegistered = true
+  // Fire-and-forget residue sweep: retiring a plugin is a repo-side decision, but
+  // every profile still carries its row/key/link until this one pass removes them.
+  retiredSweepOnce(ctx, __cfg)
   // Fire-and-forget: the first load doubles as the automatic stale-link self-check
   // (determinable items only; one action per host start).
   void autoRelinkOnce(ctx, __cfg)

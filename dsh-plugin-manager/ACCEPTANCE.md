@@ -229,3 +229,19 @@
 - [x] 修复：`execPnpm` 失败文案在 stderr 为空时回退 **stdout**，`ERR_PNPM_*` 不再被吞成 `pnpm install failed`。
 - [x] 回归：7 支测试全绿——`host-core` / `bundle` / `debounce` / `batch-remove-all` / `uninstall` / `root-install-shell` / `entry-config`。其中 `debounce` 与 `batch-remove-all` 原本依赖 `fs.symlinkSync(realYaml, …, 'junction')` 让临时 profile 能解析 `js-yaml`，在受限 Windows shell 下 `EPERM`；改为「junction 失败则 `fs.cpSync` 复制」，语义不变（仍不改真实 profile）。
 - [ ] 需真机：把 profile 里 `dsh-plugin-manager` 的 spec（当前钉在 `github:…/dsh-plugins#3b6640c`）更新到含本次修复的提交 → 重启 desktop profile → 面板「全部开启」8 项全部成功；`profile/package.json` 的 8 条子插件键变成 `link:./node_modules/dsh-plugin-manager/sub-plugins/<dir>`；`pnpm-workspace.yaml` 里那条旧锚点消失；`/status` 的 `workspace.ok === true`。
+
+## A17 退役插件的存量清理：patch 行 + 依赖键 + 链接点（2026-10-10）
+
+动机：2026-10-10 用户在 DSH 插件列表看到一个不该存在的 `hindsight-model` 幽灵条目、同时看不到新启用的 terminal-font——前者就是「退役只是从扫描里摘掉，profile 里的激活行还在」的存量问题（当次靠手工删行收尾）。本节把那次手工步骤固化成代码：退役一个插件后，每一个曾激活过它的 profile 在下次启动管理器时自动恢复干净。
+
+做法：`host-core.js` 新增三个纯函数——`retiredRowIds()`（由 `RETIRED_PLUGIN_DIRS` 派生行 id，单一事实源）、`stripRetiredPatchRows(rows)`（复用 `removeManaged` 语义删激活行，干净时返回**原引用**作为零写信号）、`stripRetiredManifestKeys(manifest)`（`dependencies`/`devDependencies` 两侧删退休键，干净时原引用）。`index.js` 新增导出 `ensureRetiredSwept(c)`：形状对齐 `ensureWorkspaceRetired`（快照 → 纯函数剥离 → 真变了才备份再整文件重写，幂等零写入），但**绝不阻断安装**——`js-yaml` 缺失只跳过 patch 部分（键与链接照清），每步错误记入 `HOST_DIAG.retiredSweep`。接口点五个：宿主启动一次（`RETIRED_SWEEP_LATCH` 闩，先于 `autoRelinkOnce` 让自愈少跑 install）、`ensureDevDep`/`ensureDevDeps` 前置（必须先于 `readManifest`，防止旧 manifest 副本把已清键写回）、migrate 计划前（快照前清干净再算迁移）、`/status` 报 `retiredSweep` 字段。
+
+Windows junction 识别是本次的硬骨头：pnpm 的 `link:` 目录在 Windows 落成 directory junction，而 Node 24 对它 `lstatSync().isSymbolicLink() === false`、`readlinkSync` 抛 `EINVAL`、`lstat` 与 `stat` 的 dev/ino 相同（lstat 直接报告 target 身份）——三条常规识别全灭。最终判据：junction 的 lstat dev/ino **等于本仓库源目录**的 dev/ino（NTFS 两个路径同 ino = 同一对象；目录硬链接在 Windows 实际不存在 → 必是 junction）；断链 = lstat 在而 stat 抛；真 symlink = isSymbolicLink。`rmdirSync` 对 junction 只删链接点（实测源目录完好）。`classifyNodeModulesLink()` 承载该判定，``node_modules` 下真实目录永远不等于仓库 dev/ino → 绝不误删。
+
+- [x] 自动化：`retiredRowIds()` 派生顺序正确；`stripRetiredPatchRows` 删 ghost insert 行（含重复两行的合并语义）、override 行同样删、幸存行逐条不变、干净时同引用、入参不被改写。
+- [x] 自动化：`stripRetiredManifestKeys` 两侧键全删、幸存键字节不变、干净时同引用、null/畸形形态不抛。
+- [x] 自动化（`retired-sweep.test.mjs` 集成组，真 js-yaml 借自真实 profile）：三残留一次清完——junction 链接点被删且**仓库源目录完好**；patch 只少 ghost 行、manifest 只少退休键；备份恰好 2 份（patch+manifest）。
+- [x] 自动化：幂等——第二遍 `changed=false`、零新备份（盘上 `.bak-` 计数不变）、`error=null`。
+- [x] 自动化：无 js-yaml 的 profile → patch 部分跳过（`error` 含说明）、键清理照常执行、绝不抛出。
+- [x] 回归：8 支测试全绿（原 7 支 + 本文件）；`ensureDevDep`/`ensureDevDeps` 前置清扫不改变任何既有断言。
+- [ ] 需真机：desktop profile 里此前手工已清（hindsight 行/键/junction 全无）→ 重启后 `/status` 的 `hostDiag.retiredSweep` 为 `{ changed: false }`（幂等零写入被真实验证）；将来退役任何新插件时只加数组名，存量自动消失。
