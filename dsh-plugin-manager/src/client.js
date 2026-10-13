@@ -85,6 +85,9 @@ window.__ModuleLoader__.load({
       stateInvalid: '非插件目录',
       noPlugins: '子插件目录（sub-plugins/）没有发现 dsh-* 子插件。',
       error: '出错',
+      hostDown: '插件宿主没有响应（HTTP {status}）：宿主半没有挂载 /__dsh-plugin-manager 路由。请重启 DSH 后重试；若仍然如此，打开「设置 → 插件」查看 dsh-plugin-manager 条目的状态与报错。',
+      hostNotJson: '插件宿主返回了非 JSON 响应（HTTP {status}）：端点未注册或已被回滚。',
+      hostOffline: '连接插件宿主失败（{reason}）：DSH 可能正在重启，稍后点「刷新」重试。',
       hasClientTag: '带界面',
     }
     const enDict = {
@@ -143,6 +146,9 @@ window.__ModuleLoader__.load({
       stateInvalid: 'Not a plugin',
       noPlugins: 'No dsh-* plugins found under sub-plugins/.',
       error: 'Error',
+      hostDown: 'The plugin host did not answer (HTTP {status}): its /__dsh-plugin-manager route is not mounted. Restart DSH and retry; if this persists, open Settings > Plugins and check the dsh-plugin-manager entry state.',
+      hostNotJson: 'The plugin host returned a non-JSON response (HTTP {status}): the endpoint is not registered or was rolled back.',
+      hostOffline: 'Could not reach the plugin host ({reason}): DSH may be restarting; retry with Refresh in a moment.',
       hasClientTag: 'UI',
     }
     const t = (key) => {
@@ -341,10 +347,25 @@ window.__ModuleLoader__.load({
       const load = useCallback(async () => {
         const id = ++seq.current
         try {
-          const res = await fetch(`${API}/list`)
-          const json = await res.json()
+          // The panel ships in the client bundle, which loads independently of the
+          // host half. When the host half never mounted its routes, /list answers
+          // 404 with an EMPTY body, and res.json() used to throw the bare
+          // "Unexpected end of JSON input" — a message naming neither the endpoint
+          // nor the fix. Classify the transport first, then parse defensively.
+          let res = null
+          try {
+            res = await fetch(`${API}/list`)
+          } catch (e) {
+            throw new Error(t('hostOffline').replace('{reason}', (e && e.message) || String(e)))
+          }
+          let json = null
+          try { json = await res.json() } catch { json = null }
           if (id !== seq.current) return
-          if (!res.ok || !json.ok) throw new Error(json.error || `HTTP ${res.status}`)
+          if (!res.ok) {
+            const detail = (json && json.error) || (res.status === 404 ? t('hostDown') : t('hostNotJson'))
+            throw new Error(String(detail).replace('{status}', String(res.status)))
+          }
+          if (!json || json.ok !== true) throw new Error((json && json.error) || `HTTP ${res.status}`)
           setData(json.data)
           setErr(null)
         } catch (e) {

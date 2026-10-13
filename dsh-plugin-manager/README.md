@@ -30,6 +30,18 @@ dsh plugin --profile web add git+https://github.com/Chen5173/dsh-plugins.git
 - **连点会合并**：短时间内多次开关只落盘一次。落盘会让核心重应用整棵配置树，界面可能短暂无响应。
 - **没有**撤销按钮，也不会自动迁移旧布局。「全部移除」只摘依赖键与激活行，**不会删除**仓库里的子插件目录，所以恢复成本 = 重新点一次「全部开启」。
 
+### 面板报错怎么自查
+
+面板顶部的红字现在分三种情况给话：宿主端点未注册（HTTP 404 → 重启 DSH；仍失败就看下面）、响应不是 JSON（端点未注册或已回滚）、连不上宿主（DSH 可能正在重启）。这三种以前都只会显示浏览器原生的 `Failed to execute 'json' on 'Response': Unexpected end of JSON input`。
+
+宿主半每次启动会把一份诊断快照写到 `<profile>/.plugin-manager/host-diag.json`（**只在装进 profile 时写**，在仓库里跑测试不会留文件）：
+
+- `httpMounted` / `endpointsRegistered`：路由是否真的挂上。
+- `httpSkipped`：没挂上的原因原文（`webServer service is not available`、`register failed: webserver: duplicate route …` 等）。
+- `applyError` / `applyErrorStack`：`apply()` 本体抛错时的前 8 帧；`settingsError`：设置段失败的原因。
+
+配合 stderr 上的一行 `dsh-plugin-manager: …`，这几项足以判断是「宿主没起来」、「路由被占」还是「设置段连累」。
+
 ### 退役的子插件不会出现在面板里
 
 `src/host-core.js` 里有一份 `RETIRED_PLUGIN_DIRS`：登记在那里的目录**仍然留在仓库当参考源码**（README / ACCEPTANCE / 测试照旧可读可跑），但 `listRepoPluginDirs()` 扫描时会跳过它，所以面板既不会列出、也不会再激活它，`/list` 与三个批量按钮的计数里也没有它。

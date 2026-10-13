@@ -105,6 +105,70 @@ await test('0.1.x keeps the installSection route when the service offers it', as
   assert.equal(hostIndex.HOST_DIAG.autoRelinkEnabled, false, 'the section source still feeds the switch')
 })
 
+await test('a null webServer service is not mistaken for a live one (regression: silent 404 panel)', () => {
+  let injected = 0
+  const ctx = {
+    baseUrl: pathToFileURL(path.join(repoRoot, 'package.json')).href,
+    get: (key) => (key === 'webServer' ? null : undefined),
+    inject: () => { injected += 1 },
+    on: () => () => {},
+    effect: (fn) => fn(),
+  }
+  hostIndex.apply(ctx, { repoRoot })
+  assert.equal(hostIndex.HOST_DIAG.httpMounted, false, 'nothing is mounted when the service is absent')
+  assert.match(String(hostIndex.HOST_DIAG.httpSkipped || ''), /webServer/, 'the reason is recorded instead of vanishing')
+  assert.equal(injected >= 1, true, 'the inject() fallback is still attempted')
+})
+
+await test('a refused route registration is recorded, not thrown (a live patch reload leaves duplicates)', () => {
+  hostIndex.HOST_DIAG.applyError = null
+  hostIndex.HOST_DIAG.httpSkipped = null
+  const ctx = {
+    baseUrl: pathToFileURL(path.join(repoRoot, 'package.json')).href,
+    get: (key) => (key === 'webServer'
+      ? { register: () => { throw new Error('webserver: duplicate route "/__dsh-plugin-manager"') } }
+      : undefined),
+    inject: () => {},
+    on: () => () => {},
+    effect: (fn) => fn(),
+  }
+  hostIndex.apply(ctx, { repoRoot })
+  assert.equal(hostIndex.HOST_DIAG.applyError, null, 'the host survived the refusal')
+  assert.equal(hostIndex.HOST_DIAG.httpMounted, false, 'and knows the routes are not live')
+  assert.match(String(hostIndex.HOST_DIAG.httpSkipped || ''), /duplicate route/, 'the reason is recorded verbatim')
+})
+
+await test('a throwing service getter cannot roll back the panel transport', () => {
+  hostIndex.HOST_DIAG.applyError = null
+  hostIndex.HOST_DIAG.settingsError = null
+  const registered = []
+  const ctx = {
+    baseUrl: pathToFileURL(path.join(repoRoot, 'package.json')).href,
+    get: (key) => {
+      if (key === 'webServer') return { register: (route) => { registered.push(route); return () => {} } }
+      if (key === 'settings') throw new Error('boom settings')
+      return undefined
+    },
+    inject: () => {},
+    on: () => () => {},
+    effect: (fn) => fn(),
+  }
+  hostIndex.apply(ctx, { repoRoot })
+  assert.equal(hostIndex.HOST_DIAG.applyError, null, 'the failure stayed inside its guard')
+  assert.equal(hostIndex.HOST_DIAG.settingsError, 'boom settings', 'and is recorded for diagnosis')
+  assert.equal(registered.length, 1, 'the panel transport is mounted anyway')
+})
+
+await test('a settings service that refuses the namespace is recorded, not thrown', async () => {
+  hostIndex.HOST_DIAG.applyError = null
+  hostIndex.HOST_DIAG.settingsError = null
+  const settings = { installSection: () => { throw new Error('No configurable plugin entry "dshPluginManager"') } }
+  hostIndex.apply(makeCtx({ settings }), { repoRoot })
+  for (let i = 0; i < 20 && !hostIndex.HOST_DIAG.settingsError; i += 1) await new Promise((resolve) => setImmediate(resolve))
+  assert.match(String(hostIndex.HOST_DIAG.settingsError || ''), /No configurable plugin entry/, 'the refusal is recorded')
+  assert.equal(hostIndex.HOST_DIAG.applyError, null, 'apply() itself never threw')
+})
+
 console.log()
 if (failures.length > 0) {
   console.log(failures.length + ' failing:')

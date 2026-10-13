@@ -93,6 +93,18 @@ export const HOST_DIAG = {
   endpointsRegistered: false,
   yamlResolved: false,
   yamlError: null,
+  /** Whether registerHttp() actually mounted the /__dsh-plugin-manager routes. */
+  httpMounted: false,
+  /** Why the routes were NOT mounted (null when they were). */
+  httpSkipped: null,
+  /** Last apply() failure: cordis rolls back every effect of this plugin when apply throws. */
+  applyError: null,
+  /** First stack frames of the last apply() failure (diagnosis aid). */
+  applyErrorStack: null,
+  /** Last settings-section install failure (optional capability, never fatal). */
+  settingsError: null,
+  /** File the last host-diagnostic snapshot was written to (null when skipped). */
+  diagFile: null,
   /** Switch intents accepted but not yet written to the patch file. */
   pendingWrites: 0,
   /** Last debounced-flush failure (null when the last flush succeeded). */
@@ -170,18 +182,26 @@ function installSettingsSection(ctx, settings) {
   if (!settings || typeof settings.installSection !== 'function') return
   const register = (Config) => {
     if (!Config) return
-    settings.installSection(ctx, SETTINGS_NS, Config, { [AUTO_RELINK_FIELD]: DEFAULT_AUTO_RELINK }, {
-      setSource(source) {
-        try {
-          const current = source()
-          __autoRelink = current && typeof current === 'object'
-            ? current[AUTO_RELINK_FIELD] !== false
-            : DEFAULT_AUTO_RELINK
-        } catch { /* source not ready yet */ }
-        HOST_DIAG.autoRelinkEnabled = __autoRelink
-      },
-      onChange() { HOST_DIAG.autoRelinkEnabled = __autoRelink },
-    })
+    // A refused namespace must never escape: an unhandled rejection here (0.2.0
+    // settings services throw for foreign namespaces) would be attributed to the
+    // entry, and the panel transport is worth more than this optional switch.
+    try {
+      settings.installSection(ctx, SETTINGS_NS, Config, { [AUTO_RELINK_FIELD]: DEFAULT_AUTO_RELINK }, {
+        setSource(source) {
+          try {
+            const current = source()
+            __autoRelink = current && typeof current === 'object'
+              ? current[AUTO_RELINK_FIELD] !== false
+              : DEFAULT_AUTO_RELINK
+          } catch { /* source not ready yet */ }
+          HOST_DIAG.autoRelinkEnabled = __autoRelink
+        },
+        onChange() { HOST_DIAG.autoRelinkEnabled = __autoRelink },
+      })
+    } catch (e) {
+      HOST_DIAG.settingsError = (e && e.message) || String(e)
+      process.stderr.write(`dsh-plugin-manager: settings section not installed: ${HOST_DIAG.settingsError}\n`)
+    }
   }
   Promise.resolve()
     .then(() => import('@deepseek-ai/schemastery'))
@@ -944,8 +964,46 @@ async function dropDevDeps(c, names) {
 
 // --- HTTP registration -------------------------------------------------------
 
+/**
+ * Persist the host diagnostics beside the profile (\`.plugin-manager/host-diag.json\`).
+ *
+ * The panel cannot report why its routes are missing: an unregistered route answers
+ * 404 with an EMPTY body, so the browser only ever sees the bare
+ * "Failed to execute 'json' on 'Response': Unexpected end of JSON input". The reason
+ * therefore has to survive outside the HTTP surface.
+ *
+ * Skipped when the resolved directory is not a real profile (no cordis.yml /
+ * cordis.patch.yml, or the repo root itself), so tests and odd anchors stay clean.
+ */
+function writeHostDiag(ctx, config, resolved) {
+  try {
+    const c = resolved || resolveContext(config || {}, ctx && ctx.baseUrl)
+    const isProfile = c.profileDir !== c.repoRoot
+      && (fs.existsSync(path.join(c.profileDir, 'cordis.yml')) || fs.existsSync(path.join(c.profileDir, 'cordis.patch.yml')))
+    if (!isProfile) return null
+    const dir = path.join(c.profileDir, '.plugin-manager')
+    fs.mkdirSync(dir, { recursive: true })
+    const file = path.join(dir, 'host-diag.json')
+    HOST_DIAG.diagFile = file
+    fs.writeFileSync(file, `${JSON.stringify({ at: new Date().toISOString(), pid: process.pid, ...HOST_DIAG }, null, 2)}\n`)
+    return file
+  } catch {
+    return null
+  }
+}
+
 function registerHttp(ctx, host, config) {
-  if (!host || typeof host.register !== 'function') return
+  if (!host || typeof host.register !== 'function') {
+    // Used to return silently. The panel then showed only the JSON-parse error of a
+    // 404 with an empty body, with nothing anywhere naming the actual cause.
+    HOST_DIAG.httpMounted = false
+    HOST_DIAG.httpSkipped = host ? 'webServer.register is not a function' : 'webServer service is not available'
+    process.stderr.write(`dsh-plugin-manager: HTTP routes not mounted: ${HOST_DIAG.httpSkipped}\n`)
+    writeHostDiag(ctx, config)
+    return
+  }
+  HOST_DIAG.httpMounted = true
+  HOST_DIAG.httpSkipped = null
   const __cfg = config || {}
 
   const h = async (req, res) => {
@@ -1370,7 +1428,25 @@ function registerHttp(ctx, host, config) {
   }
 
   ctx.effect(() => {
-    const registered = host.register({ kind: 'prefix', path: HTTP_PREFIX, handler: h })
+    let registered = null
+    try {
+      registered = host.register({ kind: 'prefix', path: HTTP_PREFIX, handler: h })
+    } catch (e) {
+      // A duplicate (kind, path) — the shape a live patch reload leaves behind when the
+      // previous registration was never released — used to escape apply() and roll back
+      // EVERY effect of this plugin. The panel then kept calling a route nobody served
+      // and could only report the JSON-parse error of a 404 with an empty body.
+      HOST_DIAG.endpointsRegistered = false
+      HOST_DIAG.httpMounted = false
+      HOST_DIAG.httpSkipped = `register failed: ${(e && e.message) || String(e)}`
+      process.stderr.write(`dsh-plugin-manager: ${HOST_DIAG.httpSkipped}\n`)
+      writeHostDiag(ctx, __cfg)
+      return () => {}
+    }
+    HOST_DIAG.endpointsRegistered = true
+    HOST_DIAG.httpMounted = true
+    HOST_DIAG.httpSkipped = null
+    writeHostDiag(ctx, __cfg)
     return () => {
       if (flushTimer) { clearTimeout(flushTimer); flushTimer = null }
       // A queued switch must not evaporate when the host exits.
@@ -1378,7 +1454,6 @@ function registerHttp(ctx, host, config) {
       if (typeof registered === 'function') { try { registered() } catch { /* best effort */ } }
     }
   })
-  HOST_DIAG.endpointsRegistered = true
   // Fire-and-forget residue sweep: retiring a plugin is a repo-side decision, but
   // every profile still carries its row/key/link until this one pass removes them.
   retiredSweepOnce(ctx, __cfg)
@@ -1432,7 +1507,28 @@ async function autoRelinkOnce(ctx, cfg) {
 
 // --- plugin ------------------------------------------------------------------
 
+/**
+ * Public entry (cordis bundle contract).
+ *
+ * cordis rolls back EVERY effect this plugin registered when apply() throws — the
+ * /__dsh-plugin-manager routes included — while the client half stays loaded (it
+ * ships in the client module table and does not depend on the host half). The panel
+ * then shows nothing but a JSON-parse error of a 404 with an empty body. So an
+ * unexpected throw must not take the whole host surface down: record it first.
+ */
 function apply(ctx, config = {}) {
+  try {
+    applyHost(ctx, config)
+  } catch (e) {
+    const msg = (e && e.message) || String(e)
+    HOST_DIAG.applyError = msg
+    HOST_DIAG.applyErrorStack = e && e.stack ? String(e.stack).split('\n').slice(0, 8).join(' | ') : null
+    process.stderr.write(`dsh-plugin-manager: apply failed: ${msg}\n`)
+    writeHostDiag(ctx, config)
+  }
+}
+
+function applyHost(ctx, config = {}) {
   const c0 = resolveContext(config, ctx && ctx.baseUrl)
   HOST_DIAG.profileName = c0.profileName
   HOST_DIAG.repoRoot = c0.repoRoot
@@ -1445,32 +1541,59 @@ function apply(ctx, config = {}) {
   }
 
   // Settings section (optional): the automatic stale-link relink switch.
-  const settings = typeof ctx.get === 'function' ? ctx.get('settings') : null
-  if (settings !== undefined) {
-    installSettingsSection(ctx, settings)
-  } else {
-    try {
+  // Guarded on its own: the section is a nicety, the HTTP routes are the panel's
+  // only transport, and an escape from here would roll both of them back.
+  try {
+    // Inside the guard on purpose: a throwing service getter used to escape
+    // apply() and take every effect of this plugin down with it.
+    const settings = typeof ctx.get === 'function' ? ctx.get('settings') : null
+    if (settings !== undefined) {
+      installSettingsSection(ctx, settings)
+    } else {
       ctx.inject(['settings'], (sub) => {
         installSettingsSection(ctx, sub && sub.settings ? sub.settings : sub)
       })
-    } catch { /* no settings service: auto-relink stays at its default (on) */ }
+    }
+  } catch (e) {
+    HOST_DIAG.settingsError = (e && e.message) || String(e)
+    process.stderr.write(`dsh-plugin-manager: settings section unavailable: ${HOST_DIAG.settingsError}\n`)
+  }
+
+  // The panel's transport. ctx.get() hands back null when the service is absent
+  // (not only undefined), and the previous `ws !== undefined` test read that null as
+  // "service available", registered nothing, and never tried the inject() fallback.
+  // Mount exactly once, and keep the inject() fallback open when the first try fails.
+  let httpMountStarted = false
+  const mountHttp = (host) => {
+    if (httpMountStarted) return
+    if (!host || typeof host.register !== 'function') return
+    httpMountStarted = true
+    registerHttp(ctx, host, config)
   }
   const ws = typeof ctx.get === 'function' ? ctx.get('webServer') : null
-  if (ws !== undefined) {
-    registerHttp(ctx, ws, config)
-  } else {
+  mountHttp(ws)
+  if (!httpMountStarted) {
     try {
       ctx.inject(['webServer'], (sub) => {
-        registerHttp(ctx, sub && sub.webServer ? sub.webServer : sub, config)
+        mountHttp(sub && sub.webServer ? sub.webServer : sub)
       })
     } catch {
       // terminal-only profile: no web surface, nothing to serve.
     }
   }
+  if (!httpMountStarted) {
+    HOST_DIAG.httpMounted = false
+    HOST_DIAG.httpSkipped = ws === null || ws === undefined
+      ? 'webServer service is not available'
+      : 'webServer.register is not a function'
+    process.stderr.write(`dsh-plugin-manager: HTTP routes not mounted: ${HOST_DIAG.httpSkipped}\n`)
+  }
+
   // Lazy yaml diag for /status
   const probe = requireProfileYaml(c0.profileDir)
   HOST_DIAG.yamlResolved = Boolean(probe.jsyaml)
   HOST_DIAG.yamlError = probe.error
+  writeHostDiag(ctx, config, c0)
 }
 
 /** Test-only: flip the automatic-relink switch without a settings service. */

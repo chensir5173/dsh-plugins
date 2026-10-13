@@ -54,6 +54,8 @@ const BATCH_COUNTS = () => ({
   remove: { count: 1, needsInstall: 0, skippedLegacy: 0, skippedInactive: 0, skippedInvalid: 1 },
 })
 const state = {
+  // 'ok' | 'http404' | 'badjson' | 'offline' — failure modes of the /list route.
+  listMode: 'ok',
   legacyDetected: false,
   pendingWrites: 0,
   batchCounts: BATCH_COUNTS(),
@@ -79,7 +81,18 @@ function payload() {
 }
 async function fetchStub(url, opts) {
   fetchCalls.push({ url, opts })
-  if (url === '/__dsh-plugin-manager/list') return { ok: true, json: async () => payload() }
+  if (url === '/__dsh-plugin-manager/list') {
+    // The host half can be missing while the client half is loaded: DSH then answers
+    // the plugin prefix route with 404 and an EMPTY body.
+    if (state.listMode === 'offline') throw new Error('Failed to fetch')
+    if (state.listMode === 'http404') {
+      return { ok: false, status: 404, json: async () => { throw new SyntaxError("Failed to execute 'json' on 'Response': Unexpected end of JSON input") } }
+    }
+    if (state.listMode === 'badjson') {
+      return { ok: false, status: 502, json: async () => { throw new SyntaxError('Unexpected token < in JSON') } }
+    }
+    return { ok: true, json: async () => payload() }
+  }
   if (url === '/__dsh-plugin-manager/status') {
     return { ok: true, json: async () => ({ ok: true, pendingWrites: state.pendingWrites || 0, lastFlushError: null }) }
   }
@@ -291,6 +304,40 @@ const textOf = (node) => {
 const flush = () => new Promise((resolve) => setImmediate(resolve))
 
 // --- tests -------------------------------------------------------------------
+
+test('an unregistered host route (HTTP 404, empty body) reports a human reason, never the JSON parse error', async () => {
+  const section = mountSection()
+  fresh()
+  state.listMode = 'http404'
+  try {
+    section()
+    await flush()
+    begin()
+    const texts = textOf(section())
+    assert.match(texts, /404/, 'the panel surfaces the HTTP status')
+    assert.match(texts, /重启 DSH/, 'and names the concrete fix')
+    assert.match(texts, /__dsh-plugin-manager/, 'and names the missing route')
+    assert.doesNotMatch(texts, /Unexpected end of JSON input/, 'the raw parse error never reaches the user')
+  } finally {
+    state.listMode = 'ok'
+  }
+})
+
+test('a non-JSON response and an unreachable host each get their own readable reason', async () => {
+  for (const [mode, expected] of [['badjson', /非 JSON 响应（HTTP 502）/], ['offline', /连接插件宿主失败/]]) {
+    const section = mountSection()
+    fresh()
+    state.listMode = mode
+    try {
+      section()
+      await flush()
+      begin()
+      assert.match(textOf(section()), expected, `mode ${mode}`)
+    } finally {
+      state.listMode = 'ok'
+    }
+  }
+})
 
 test('bundle owns the「本地插件」nav entry (order 16) and its own panel tab (order 0)', () => {
   const api = factoryApi()

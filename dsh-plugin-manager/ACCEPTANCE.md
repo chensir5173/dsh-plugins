@@ -245,3 +245,18 @@ Windows junction 识别是本次的硬骨头：pnpm 的 `link:` 目录在 Window
 - [x] 自动化：无 js-yaml 的 profile → patch 部分跳过（`error` 含说明）、键清理照常执行、绝不抛出。
 - [x] 回归：8 支测试全绿（原 7 支 + 本文件）；`ensureDevDep`/`ensureDevDeps` 前置清扫不改变任何既有断言。
 - [ ] 需真机：desktop profile 里此前手工已清（hindsight 行/键/junction 全无）→ 重启后 `/status` 的 `hostDiag.retiredSweep` 为 `{ changed: false }`（幂等零写入被真实验证）；将来退役任何新插件时只加数组名，存量自动消失。
+
+## A18 面板传输层的自诊断与降级（2026-10-13）
+
+动机：2026-10-13 用户报「本地插件」面板红字 `Failed to execute 'json' on 'Response': Unexpected end of JSON input`。根因链是两端各缺一层：客户端 `load()` 先 `res.json()` 后判 `res.ok`（404 空体直接抛浏览器原生文案），宿主半把 `ctx.get('webServer')` 的 **null** 当成服务可用而静默不注册路由，且 `ctx.effect` 内注册抛错会冒泡拖垮整个 `apply()`（cordis 回滚本插件全部 effect）。本节把这条链上的每一环都变成「可见 + 不致命」。
+
+做法：客户端 `load()` 改为 fetch try/catch → `res.ok` 前置 → `res.json()` 兜底 null，404 / 非 JSON / 断连分别给人话文案（`hostDown` / `hostNotJson` / `hostOffline`，zh/en 各 3 键）；宿主半 `apply()` 拆成外层 `apply()`（全 catch，记 `applyError` / `applyErrorStack`）+ `applyHost()`，settings 段与 `installSection` 各自 try/catch（记 `settingsError`），webServer 改幂等 `mountHttp()` + 真值判断 + `ctx.inject(['webServer'])` 兜底，`ctx.effect` 内 `host.register()` 抛错就地记 `httpSkipped` 并返回空 cleanup；新增 `writeHostDiag()` 把 HOST_DIAG 快照写到 `<profileDir>/.plugin-manager/host-diag.json` —— **仅当 `profileDir !== repoRoot` 且目录内含 `cordis.yml` / `cordis.patch.yml`**（否则单测与仓库根会被污染）。
+
+- [x] 自动化：`bundle.test.mjs` 的 `listMode` 三态 —— 404 空体时面板出现 404 / 重启 DSH / 端点名提示，且**不出现** `Unexpected end of JSON input`；502 非 JSON 与 fetch 抛错各有专属文案。
+- [x] 自动化：`entry-config.test.mjs` —— `get('webServer')` 返回 null 时 `httpMounted=false`、`httpSkipped` 含 webServer、`inject` 仍被调用（即不再「null 放行、永不兜底」）。
+- [x] 自动化：服务 getter 抛错时 `applyError` 仍为 null（分段保护生效）、`settingsError` 记录原因、面板路由照常注册 1 条。
+- [x] 自动化：`register` 抛 `webserver: duplicate route …` 时 `applyError=null`、`httpMounted=false`、`httpSkipped` 原样记录错误消息（不再回滚整个插件）。
+- [x] 自动化：`installSection` 对外来 ns 抛 `No configurable plugin entry` 被记录（异步等 setImmediate 后断言）。
+- [x] 自动化：诊断文件只在真 profile 写 —— 仓库根跑测试后不产生 `.plugin-manager/`。
+- [x] 回归：管理器 7 支全绿（entry-config 9 checks、bundle / root-install-shell PASS）。
+- [ ] 需真机：重启 DSH 后 `GET /__dsh-plugin-manager/list` 返回 200、面板正常列出子插件；若仍 404，`<profile>/.plugin-manager/host-diag.json` 的 `httpSkipped` / `applyError` 给出原因（本次故障的直接根因尚未证实）。
