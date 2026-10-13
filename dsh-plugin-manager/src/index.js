@@ -61,6 +61,7 @@ import {
   readPluginMeta,
   readManifest,
   makeYamlEngine,
+  probeYamlEngine,
   readPatchRows,
   writePatchRows,
   removeManaged,
@@ -92,6 +93,9 @@ export const HOST_DIAG = {
   profileName: DEFAULT_PROFILE,
   endpointsRegistered: false,
   yamlResolved: false,
+  /** Version/flavour of the profile's resolved js-yaml copy (null when unresolved). */
+  yamlVersion: null,
+  yamlFlavor: null,
   yamlError: null,
   /** Whether registerHttp() actually mounted the /__dsh-plugin-manager routes. */
   httpMounted: false,
@@ -377,23 +381,63 @@ function resolveContext(config, baseUrl) {
   }
 }
 
-/** Resolve the profile's own js-yaml through createRequire(profile package). */
+/** Nearest package.json version of the resolved js-yaml copy (diagnostics only). */
+function yamlVersionOf(req) {
+  try {
+    let dir = path.dirname(req.resolve(YAML_PKG))
+    for (let i = 0; i < 8; i += 1) {
+      const meta = path.join(dir, 'package.json')
+      if (fs.existsSync(meta)) {
+        const pkg = JSON.parse(fs.readFileSync(meta, 'utf8'))
+        return pkg && pkg.name === YAML_PKG && typeof pkg.version === 'string' ? pkg.version : null
+      }
+      const up = path.dirname(dir)
+      if (up === dir) return null
+      dir = up
+    }
+    return null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 功能作用：解析 profile 自己的 js-yaml（createRequire(profile/package.json)）并做「能力」校验：
+ *           load/dump 之外还要能建带 `!!js` 自定义 tag 的 schema，见 probeYamlEngine。
+ * 参数：profileDir: string -- <DSH_HOME>/profiles/<name>
+ * 返回值：{ jsyaml, version, flavor, reason, error } —— 不可用时 jsyaml=null 且 error 为可读原因，
+ *         reason='missing'（没装/没解析到，可尝试自动安装）或 'unsupported'（装了但 API 不认识，
+ *         绝不能自动装 js-yaml@4 去覆盖，那会连累依赖它的 dsh-mcp-manager）。
+ * 调用样例：const probe = requireProfileYaml(c.profileDir); if (!probe.jsyaml) skip()
+ */
 function requireProfileYaml(profileDir) {
   try {
     const req = createRequire(path.join(profileDir, 'package.json'))
     const jsyaml = req(YAML_PKG)
-    if (jsyaml && typeof jsyaml.load === 'function' && typeof jsyaml.dump === 'function') {
-      return { jsyaml, error: null }
+    const version = yamlVersionOf(req)
+    if (!jsyaml || typeof jsyaml.load !== 'function' || typeof jsyaml.dump !== 'function') {
+      return { jsyaml: null, version, flavor: null, reason: 'missing', error: `${YAML_PKG} did not load from profile node_modules` }
     }
-    return { jsyaml: null, error: `${YAML_PKG} did not load from profile node_modules` }
+    // The capability check lives here, not at the call sites: v5 (hoisted by a newer
+    // dsh-mcp-manager) has no `Type`, and letting it through made
+    // "jsyaml.Type is not a constructor" escape from deep inside applyHost().
+    const probe = probeYamlEngine(jsyaml)
+    if (!probe.ok) {
+      return { jsyaml: null, version, flavor: null, reason: 'unsupported', error: `${YAML_PKG}@${version || '?'}: ${probe.error}` }
+    }
+    return { jsyaml, version, flavor: probe.flavor, reason: null, error: null }
   } catch (e) {
-    return { jsyaml: null, error: (e && (e.message || e.code)) || String(e) }
+    return { jsyaml: null, version: null, flavor: null, reason: 'missing', error: (e && (e.message || e.code)) || String(e) }
   }
 }
 
 async function ensureYaml(profileDir) {
   const first = requireProfileYaml(profileDir)
   if (first.jsyaml) return { engine: makeYamlEngine(first.jsyaml), error: null, installed: false }
+  // Loaded but unsupported is NOT the same as missing: installing js-yaml@^4 on
+  // top of it would downgrade the profile's own copy (dsh-mcp-manager's
+  // transitive), so report the version clash instead of touching the profile.
+  if (first.reason === 'unsupported') return { engine: null, error: first.error, installed: false }
   const res = await pnpmRunner(profileDir, ['add', '-D', `${YAML_PKG}@${YAML_PKG_RANGE}`])
   if (!res.ok) return { engine: null, error: `js-yaml unavailable and install failed: ${res.error || res.stderr}` }
   const second = requireProfileYaml(profileDir)
@@ -1023,6 +1067,8 @@ function registerHttp(ctx, host, config) {
           patchFile: c.patchFile,
           endpointsRegistered: true,
           yamlResolved: HOST_DIAG.yamlResolved,
+          yamlVersion: HOST_DIAG.yamlVersion,
+          yamlFlavor: HOST_DIAG.yamlFlavor,
           yamlError: HOST_DIAG.yamlError,
           pendingWrites: pendingIntents.length,
           lastFlushError: HOST_DIAG.lastFlushError,
@@ -1532,8 +1578,9 @@ function applyHost(ctx, config = {}) {
   const c0 = resolveContext(config, ctx && ctx.baseUrl)
   HOST_DIAG.profileName = c0.profileName
   HOST_DIAG.repoRoot = c0.repoRoot
-  const ws0 = workspaceSnapshot(c0)
-  HOST_DIAG.workspace = { file: c0.workspaceFile, glob: ws0.state.glob, ok: ws0.state.ok, repoGlobs: ws0.state.repoGlobs }
+  // NOTE: the workspace snapshot (and every other YAML consumer) runs at the END of
+  // this function, after mountHttp(): an unsupported js-yaml copy used to throw here
+  // and cordis then rolled back the just-registered /__dsh-plugin-manager routes.
   // 0.2.0：条目 Config 里的开关值（0.1.x 的行没有 config，此分支不生效，仍走 installSection）。
   if (config && typeof config[AUTO_RELINK_FIELD] === 'boolean') {
     __autoRelink = config[AUTO_RELINK_FIELD] !== false
@@ -1589,10 +1636,20 @@ function applyHost(ctx, config = {}) {
     process.stderr.write(`dsh-plugin-manager: HTTP routes not mounted: ${HOST_DIAG.httpSkipped}\n`)
   }
 
-  // Lazy yaml diag for /status
+  // Diagnostics LAST: the panel's transport is mounted by now, so a broken or
+  // unsupported js-yaml copy degrades the panel's data instead of taking its
+  // routes down with an escaping throw.
   const probe = requireProfileYaml(c0.profileDir)
   HOST_DIAG.yamlResolved = Boolean(probe.jsyaml)
+  HOST_DIAG.yamlVersion = probe.version
+  HOST_DIAG.yamlFlavor = probe.flavor || null
   HOST_DIAG.yamlError = probe.error
+  try {
+    const ws0 = workspaceSnapshot(c0)
+    HOST_DIAG.workspace = { file: c0.workspaceFile, glob: ws0.state.glob, ok: ws0.state.ok, repoGlobs: ws0.state.repoGlobs }
+  } catch (e) {
+    HOST_DIAG.workspace = { file: c0.workspaceFile, error: (e && e.message) || String(e) }
+  }
   writeHostDiag(ctx, config, c0)
 }
 

@@ -39,6 +39,7 @@ dsh plugin --profile web add git+https://github.com/Chen5173/dsh-plugins.git
 - `httpMounted` / `endpointsRegistered`：路由是否真的挂上。
 - `httpSkipped`：没挂上的原因原文（`webServer service is not available`、`register failed: webserver: duplicate route …` 等）。
 - `applyError` / `applyErrorStack`：`apply()` 本体抛错时的前 8 帧；`settingsError`：设置段失败的原因。
+- `yamlResolved` / `yamlVersion` / `yamlFlavor` / `yamlError`：profile 那份 `js-yaml` 解析到没有、什么版本、走的哪族 API（`type-extend` = 4.x；`define-tag` = 5.x）、不可用时的原因原文。
 
 配合 stderr 上的一行 `dsh-plugin-manager: …`，这几项足以判断是「宿主没起来」、「路由被占」还是「设置段连累」。
 
@@ -64,7 +65,7 @@ dsh plugin --profile web add git+https://github.com/Chen5173/dsh-plugins.git
 - 读写目标 profile 的 `package.json`（`devDependencies`）、`cordis.patch.yml`（激活行）与 `pnpm-workspace.yaml`（**只清理早期版本留下的那条指向本仓库插件目录的 glob**，其它 glob 与键一个都不动；新装的 profile 根本不会有这个文件）；每次改动前生成 `*.bak-<时间戳>` 备份，失败自动回滚。
 - 退役插件的存量清理：摘掉 `RETIRED_PLUGIN_DIRS` 名单内插件的 `cordis.patch.yml` 激活行、`package.json` 依赖键（不跑 pnpm）与 `node_modules/<包名>` **链接点**（junction/symlink/断链，真实目录绝不动），详见上文「退役的子插件」小节。
 - 需要装依赖时在 profile 目录执行 `pnpm install`。
-- YAML 处理用 profile 自带的 `js-yaml`；缺失时自动 `pnpm add -D js-yaml` 一次。
+- YAML 处理用 profile 自带的 `js-yaml`，**4.x 与 5.x 都支持**：启动时按 API 特征探测（4.x = `new Type(...)` + `JSON_SCHEMA.extend`；5.x = `defineScalarTag` + `JSON_SCHEMA.withTags`），两族等价处理，`!!js` 标量的往返语义不变。profile 里**完全没有** js-yaml 时自动 `pnpm add -D js-yaml` 一次；若解析到的是**两族都不认识**的版本，则**不安装、不改动** profile 依赖（那份很可能是别的插件的传递依赖），只在诊断里记 `yamlError` 并降级运行（面板照常可用，依赖 YAML 的功能给出可读错误）。
 - 默认管理**当前正在运行的那个 profile**。没有 Web 界面可探测时（例如 headless 宿主）回退到 `$DSH_HOME/profiles/<config.profile || 'web'>` —— 要改这个回退目标，在 `dsh.profile.bundles` 里本插件行加 `config: { profile: '名字' }`。
 - 除以上之外不写任何持久数据。
 
@@ -98,7 +99,7 @@ node "~/.dsh/profiles/web/node_modules/dsh-plugin-manager/dsh-plugin-manager/too
 ## 版本要求
 
 - Node ≥ 20（`package.json` 的 `engines`）。
-- 宿主：profile 顶层能解析 `js-yaml`（web profile 已具备），并由 pnpm 管理（**不需要** `pnpm-workspace.yaml` 锚点；早期版本留下的那条 glob 会被自动清掉）。
+- 宿主：profile 顶层能解析 `js-yaml`（web profile 已具备；**4.x / 5.x 都支持**，见上文「它会改动你机器上的什么」），并由 pnpm 管理（**不需要** `pnpm-workspace.yaml` 锚点；早期版本留下的那条 glob 会被自动清掉）。解析到 4.x/5.x 之外的版本时插件**降级运行**：面板与批量开关照常，依赖 YAML 的功能给出可读错误；要修就把 profile 那份 `js-yaml` 换成 4.x 或 5.x（先确认它不是别的插件的传递依赖，别直接覆盖）。
 - 浏览器：需要核心提供 `react` 模块字与 `settings.localPlugins.tab` 槽（旧核心没有该槽时面板不出现，但管理器宿主机能照常工作）。客户端不依赖任何 `@deepseek-ai/*` 宿主包。
 - 宿主半导出 `Config`（`autoRelink`）：0.2.0 退役了 `settings.installSection`，设置命名空间改为「profile 条目 id 的 Config」——本包因此在设置页出现「自动修复依赖」开关；0.1.x 仍走 installSection。
 

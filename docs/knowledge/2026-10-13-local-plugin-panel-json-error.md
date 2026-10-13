@@ -37,4 +37,4 @@
 
 1. 重启 DSH：面板恢复 ⇒ 一次性 apply 失败；仍红字 ⇒ 读 `C:\Users\<用户>\.dsh\profiles\<profile>\.plugin-manager\host-diag.json`，看 `httpSkipped`（路由为何没挂）与 `applyError`（apply 为何抛）。
 2. ⚠️ **profile 里装的是 git 快照**（`dependencies` 为 `github:chensir5173/dsh-plugins`）：改仓库源码**不即时生效**，需 `dsh plugin --profile desktop update`（或改用本地路径入口）。
-3. **未证实**：本次实例（PID 36276）的 `/__dsh-plugin-manager/*` 到修复时仍 404，没拿到「条目 apply 抛错」的直接证据。最强假设 = 条目 apply 抛错 → cordis 回滚全部 effect。修复已把该路径变成**可观测**（诊断文件 + stderr + 不冒泡），下一步靠真机重启取证。
+3. **当时的假设已被证实（同日）**：重启后仍 404，`host-diag.json` 抓到 `applyError: jsyaml.Type is not a constructor`（`makeYamlEngine` ← `readWorkspaceDoc` ← `workspaceSnapshot` ← `applyHost`）——真凶是 profile 顶层解析到的 **js-yaml 5.x**（`dsh-mcp-manager` 的传递依赖）。完整根因链、两代 API 对应与修法见 [2026-10-13-js-yaml-v5-patch-engine.md](2026-10-13-js-yaml-v5-patch-engine.md)。

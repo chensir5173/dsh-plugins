@@ -259,4 +259,19 @@ Windows junction 识别是本次的硬骨头：pnpm 的 `link:` 目录在 Window
 - [x] 自动化：`installSection` 对外来 ns 抛 `No configurable plugin entry` 被记录（异步等 setImmediate 后断言）。
 - [x] 自动化：诊断文件只在真 profile 写 —— 仓库根跑测试后不产生 `.plugin-manager/`。
 - [x] 回归：管理器 7 支全绿（entry-config 9 checks、bundle / root-install-shell PASS）。
-- [ ] 需真机：重启 DSH 后 `GET /__dsh-plugin-manager/list` 返回 200、面板正常列出子插件；若仍 404，`<profile>/.plugin-manager/host-diag.json` 的 `httpSkipped` / `applyError` 给出原因（本次故障的直接根因尚未证实）。
+- [ ] 需真机：重启 DSH 后 `GET /__dsh-plugin-manager/list` 返回 200、面板正常列出子插件；若仍 404，`<profile>/.plugin-manager/host-diag.json` 的 `httpSkipped` / `applyError` 给出原因（该假设已于同日被证实：见 A19 —— 真凶是 js-yaml 5.x）。
+
+## A19 patch 引擎兼容 js-yaml 4.x / 5.x（2026-10-13）
+
+动机：A18 把「apply 抛错 → 路由被回滚 → 面板 404」变成可见之后，用户重启仍 404。`<profile>/.plugin-manager/host-diag.json` 抓到 `applyError: jsyaml.Type is not a constructor`（栈：`makeYamlEngine` ← `readWorkspaceDoc` ← `workspaceSnapshot` ← `applyHost`）。根因：desktop profile 顶层解析到的是 **js-yaml 5.4.3** —— 它**不是**本包的依赖，而是 **dsh-mcp-manager 的传递依赖**（pnpm hoisted 到 profile 顶层）；v5 移除了 `Type` 与 `Schema.extend`（改为 `defineScalarTag()` + `Schema.withTags()`），而 0.3.13 的 schema 构建写死在 4.x API 上；抛点又在挂 HTTP 路由**之前** ⇒ cordis 回滚本插件全部 effect。八支测试全绿是因为**每一支都注入假 engine**，从来没有真库建过一次 schema。
+
+做法：`host-core.js` 新增 `buildPatchSchema()`（特征探测 `Type` + `JSON_SCHEMA.extend` → `flavor:'type-extend'`；`defineScalarTag` + `JSON_SCHEMA.withTags` → `'define-tag'`；都不认识 → 返回可读 error 而不抛）与 `probeYamlEngine()`；`makeYamlEngine()` 保留抛错契约，但调用点已被 probe 挡住。`index.js` 的 `requireProfileYaml()` 在 load/dump 之外增加**能力**校验（`reason: 'missing' | 'unsupported'`），`ensureYaml()` 遇 `unsupported` **不安装** `js-yaml@^4.1.0`（profile 那份是 dsh-mcp-manager 的传递依赖，覆盖它会连累别人的依赖树）；`applyHost()` 把诊断与全部 YAML 消费**后移到 `mountHttp()` 之后**，workspace 快照各自 try/catch；`/status` 与诊断文件新增 `yamlVersion` / `yamlFlavor` / `yamlError`。
+
+- [x] 自动化：v5 形状 stub（无 `Type`）→ `probeYamlEngine` 报 `{ok:true, flavor:'define-tag'}` 且 `makeYamlEngine` 不抛；同文件断言旧代码路径 `new api.Type(...)` 在该形状下**确实抛** `TypeError`（证明该用例能抓住原 bug）。
+- [x] 自动化：v4 形状 stub → `type-extend`，tag 名 / `kind:'scalar'` / `construct`·`predicate`·`represent` 与 v5 的 `resolve`·`identify`·`represent` 逐项等价；两族的 `load`/`dump` 都收到带 `!!js` tag 的 schema 且 `lineWidth: 120`。
+- [x] 自动化：不可识别的四种形状 → `probeYamlEngine.ok=false` 且 error 文案完整（`unsupported js-yaml API: need 4.x (Type + JSON_SCHEMA.extend) or 5.x (defineScalarTag + JSON_SCHEMA.withTags)`），`makeYamlEngine` 抛同文案。
+- [x] 自动化（真库）：本机 desktop profile 的真 **js-yaml 5.4.3** → probe ok / `define-tag`；`!!js` 标量 `dump→load` 往返 deepEqual；真 `cordis.patch.yml`（607 行 / 15957B）`loadText→dumpText→loadText` 无损（dump 出 15777B）。
+- [x] 自动化（真 `apply()` + 一次性 profile）：js-yaml 为 v5 形状时 `applyError=null`、`httpMounted=true`、注册 1 条路由、`yamlResolved=true`、`yamlFlavor='define-tag'`、`yamlVersion='5.4.3'`、`workspace.ok=true`，诊断文件落盘且含 `"yamlFlavor": "define-tag"`。
+- [x] 自动化（同上，不可识别的 js-yaml）：`applyError=null`、路由照挂、`yamlResolved=false`、`yamlError` 形如 `js-yaml@6.0.0: unsupported js-yaml API: …`，且**零安装**（`__setPnpmRunner` 计数不变）——不得为绕过它去覆盖别人的传递依赖。
+- [x] 回归：管理器 8 支全绿（新增 `yaml-engine` 9 checks；`entry-config` 9 checks 在 `applyHost` 顺序调整后仍绿）。
+- [ ] 需真机：`dsh plugin --profile desktop update` 拉 0.3.14 → 重启 → `GET /__dsh-plugin-manager/list` 返回 200、面板列出子插件；`host-diag.json` 的 `yamlFlavor` 应为 `define-tag`、`yamlVersion` 为 `5.4.3`。⚠️ 首次写 patch 会有一次性整文件 diff（v5 的 dump 与磁盘上 4.x 生成的文本同位置 64/606 行不同，语义无损），`*.bak-<ts>` 备份照旧产生。

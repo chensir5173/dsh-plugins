@@ -69,6 +69,8 @@ export const LINK_PROTOCOL = 'link:'
 /** Profile devDependency the host needs for patch-file YAML round-trips. */
 export const YAML_PKG = 'js-yaml'
 export const YAML_PKG_RANGE = '^4.1.0'
+/** Custom tag that carries a DSH `!!js` expression as `{ __jsExpr: '…' }`. */
+export const JS_EXPR_TAG = 'tag:yaml.org,2002:js'
 /** HTTP endpoints namespace. */
 export const HTTP_PREFIX = '/__dsh-plugin-manager'
 /**
@@ -452,22 +454,69 @@ export function readManifest(file) {
   }
 }
 
+/** A DSH patch value that must round-trip as `!!js …`. */
+const isJsExpr = (value) => value instanceof Object && '__jsExpr' in value
+
 /**
- * Build a YAML engine wrapper around the real js-yaml (mirrors
- * dsh-mcp-manager: JSON_SCHEMA extended with the `!!js` scalar type that maps
- * to/from `{ __jsExpr }`, whole-file dump with lineWidth 120).
+ * Build the patch-file schema: JSON_SCHEMA plus the `!!js` scalar tag that maps
+ * to/from `{ __jsExpr }` (mirrors dsh-mcp-manager; whole-file dump at lineWidth
+ * 120). Two js-yaml API families are in the wild and this plugin does NOT depend
+ * on js-yaml itself — it resolves whichever copy the profile's own node_modules
+ * hoists (js-yaml is a transitive of dsh-mcp-manager):
+ *   - 4.x — `new jsyaml.Type(tag, {…})` + `jsyaml.JSON_SCHEMA.extend(tag)`
+ *   - 5.x — `jsyaml.defineScalarTag(tag, {…})` + `jsyaml.JSON_SCHEMA.withTags(tag)`
+ * Feature-detect instead of assuming one family: a 5.x copy used to reach
+ * `new jsyaml.Type(...)` and throw `jsyaml.Type is not a constructor` from
+ * inside apply(), which rolled back every effect of this plugin — the panel's
+ * HTTP routes included (the client half stays loaded, so the panel showed an
+ * empty-body 404 as a JSON parse error).
  */
-export function makeYamlEngine(jsyaml) {
-  const isJsExpr = (value) => value instanceof Object && '__jsExpr' in value
-  const JsExprType = new jsyaml.Type('tag:yaml.org,2002:js', {
-    kind: 'scalar',
-    resolve: (data) => typeof data === 'string',
-    construct: (data) => ({ __jsExpr: data }),
-    predicate: isJsExpr,
-    represent: (data) => data.__jsExpr,
-  })
-  const ENTRY_LIST_SCHEMA = jsyaml.JSON_SCHEMA.extend(JsExprType)
+export function buildPatchSchema(jsyaml) {
+  const schema = jsyaml && jsyaml.JSON_SCHEMA
+  if (jsyaml && typeof jsyaml.Type === 'function' && schema && typeof schema.extend === 'function') {
+    const JsExprType = new jsyaml.Type(JS_EXPR_TAG, {
+      kind: 'scalar',
+      resolve: (data) => typeof data === 'string',
+      construct: (data) => ({ __jsExpr: data }),
+      predicate: isJsExpr,
+      represent: (data) => data.__jsExpr,
+    })
+    return { schema: schema.extend(JsExprType), flavor: 'type-extend', error: null }
+  }
+  if (jsyaml && typeof jsyaml.defineScalarTag === 'function' && schema && typeof schema.withTags === 'function') {
+    const JsExprTag = jsyaml.defineScalarTag(JS_EXPR_TAG, {
+      implicit: false,
+      resolve: (source) => ({ __jsExpr: source }),
+      identify: isJsExpr,
+      represent: (data) => String(data.__jsExpr),
+    })
+    return { schema: schema.withTags(JsExprTag), flavor: 'define-tag', error: null }
+  }
   return {
+    schema: null,
+    flavor: null,
+    error: `unsupported ${YAML_PKG} API: need 4.x (Type + JSON_SCHEMA.extend) or 5.x (defineScalarTag + JSON_SCHEMA.withTags)`,
+  }
+}
+
+/**
+ * Feature-detect a js-yaml copy BEFORE an engine is built out of it, so an
+ * unsupported version turns into a readable error string instead of a throw.
+ */
+export function probeYamlEngine(jsyaml) {
+  const built = buildPatchSchema(jsyaml)
+  return built.schema
+    ? { ok: true, flavor: built.flavor, error: null }
+    : { ok: false, flavor: null, error: built.error }
+}
+
+/** Build a YAML engine wrapper around the real js-yaml (throws when neither API is present). */
+export function makeYamlEngine(jsyaml) {
+  const built = buildPatchSchema(jsyaml)
+  if (!built.schema) throw new Error(built.error)
+  const ENTRY_LIST_SCHEMA = built.schema
+  return {
+    flavor: built.flavor,
     loadText(text) {
       const parsed = jsyaml.load(text, { schema: ENTRY_LIST_SCHEMA })
       if (parsed === undefined || parsed === null) return []
