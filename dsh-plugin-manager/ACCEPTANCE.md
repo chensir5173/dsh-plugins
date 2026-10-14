@@ -275,3 +275,17 @@ Windows junction 识别是本次的硬骨头：pnpm 的 `link:` 目录在 Window
 - [x] 自动化（同上，不可识别的 js-yaml）：`applyError=null`、路由照挂、`yamlResolved=false`、`yamlError` 形如 `js-yaml@6.0.0: unsupported js-yaml API: …`，且**零安装**（`__setPnpmRunner` 计数不变）——不得为绕过它去覆盖别人的传递依赖。
 - [x] 回归：管理器 8 支全绿（新增 `yaml-engine` 9 checks；`entry-config` 9 checks 在 `applyHost` 顺序调整后仍绿）。
 - [ ] 需真机：`dsh plugin --profile desktop update` 拉 0.3.14 → 重启 → `GET /__dsh-plugin-manager/list` 返回 200、面板列出子插件；`host-diag.json` 的 `yamlFlavor` 应为 `define-tag`、`yamlVersion` 为 `5.4.3`。⚠️ 首次写 patch 会有一次性整文件 diff（v5 的 dump 与磁盘上 4.x 生成的文本同位置 64/606 行不同，语义无损），`*.bak-<ts>` 备份照旧产生。
+## A20 profile 锚定：ctx.baseUrl 不是 profile 目录（dshmarket 热挂载的双实例，2026-10-14）
+
+动机：用户报「明明功能界面的开关没有开启为什么功能是开启的」—— 面板顶部写「目标 profile .dsh-market」、8 个子插件全部显示未激活且开关是关的，但那些 tab 实际都在工作；点任一开关报 `copyfile '$DSH_HOME/profiles/.dsh-market/package.json' … ENOENT`。取证：dshmarket v1.66.15 的免重启热挂载（`src/hot.ts`：`HOT_DIR = '.dsh-market'`，写 `hot-<n>.yml` 后 `ctx.plugin(...)`）把本插件在**同一进程**里加载了第二次，条目 id `mkt-dsh-plugin-manager`、`ctx.baseUrl` = `<profile>/.dsh-market/`；两个条目解析到**同一个 `src/index.js` 文件 URL** ⇒ 模块级状态共享、`ctx.effect`/`register` 各一套，只有一个 fiber 抢到 `(kind:'prefix', path:'/__dsh-plugin-manager')`，输的那个在 `host-diag.json` 写 `register failed: webserver: duplicate prefix route '/__dsh-plugin-manager'`。0.3.14 的 `resolveContext()` 把 `fileURLToPath(ctx.baseUrl)` 当 profile 目录、`path.basename()` 当 profile 名 ⇒ hot 实例自认 profile `.dsh-market`，patch/manifest 指向不存在的 `$DSH_HOME/profiles/.dsh-market/`（列表空、开关 ENOENT），而 desktop 的 `cordis.patch.yml` 里 8 条子插件激活行才是「功能在跑」的真相源。
+
+做法：`host-core.js` 新增纯函数 `profileAnchorOf(home, dir)`（以 `$DSH_HOME/profiles` 为根取相对路径首段，逐级上溯 ≤32 层；不在其下返回 null）与 `resolveProfile({home, baseUrlDir, configured, dirExists})`（优先级 = 显式 `config.profile` 且目录存在 → `baseUrl` 锚定 → 锚不上的原始目录 `baseUrl-raw` → 配置的 profile（目录不存在）→ 默认 `web`）；`index.js` 的 `resolveContext()` 改用二者，`patchFile` / `manifestFile` / `workspaceFile` **一律从 `profileDir` 派生**（显示名永不参与拼路径），并导出 `__resolveContext()` 供测试；`/status` 与诊断文件新增 `profileSource`；`httpSkipped` 在 duplicate 情形改写成「另一实例已占用该前缀」的原话。
+
+- [x] 自动化（纯函数，`profile-anchor.test.mjs`）：锚定自身 / 尾分隔符 / `.dsh-market` 子目录 / `.dsh-market/hot-1.yml` / `node_modules/dsh-plugin-manager/dsh-plugin-manager/src/index.js` 深路径 / 其它 profile / 越界与空输入返回 null。
+- [x] 自动化（优先级）：`configured` 且目录存在时胜出（`source:'config'`）；**陈旧的 `configured`（目录不存在）不敌 `baseUrl` 锚定**（本 bug 的正脸）；无法锚定的 baseUrl 目录原样使用（`source:'baseUrl-raw'`）；无 baseUrl 时回退默认 `web`；无 baseUrl 且 `configured` 存在时保留历史回退语义。
+- [x] 自动化（端到端，真 `$DSH_HOME` + 真 `resolveContext()`）：`__resolveContext({}, 'file:///…/profiles/desktop/.dsh-market/')` → `profileName='desktop'`、`profileSource='baseUrl'`，且 `profileDir` / `patchFile` / `manifestFile` / `workspaceFile` **都不含 `.dsh-market`**；带 `config.profile='.dsh-market'`（目录不存在）仍得到 `desktop`；无 baseUrl 时得到 `web`（`source:'default'`）。16 checks。
+- [x] 回归：管理器 9 支全绿（`host-core` / `bundle` / `debounce` / `batch-remove-all` / `uninstall` / `root-install-shell` PASS、`entry-config` 9 checks、`yaml-engine` 9 checks、`profile-anchor` 16 checks）。
+- [ ] 需真机：装 0.3.15 → 重启 DSH → 面板顶部显示 `desktop`、列出 8 个子插件，开关状态与功能一致；`host-diag.json` 的 `profileSource` 为 `baseUrl`。若顶部仍显示 `.dsh-market`，看 `profileSource` 是否为 `baseUrl-raw`（即锚定未命中，需按自定义布局排查）。
+- [ ] 需真机：热挂载再次把本插件加载第二次时，`host-diag.json` 的 `httpSkipped` 应出现 `another instance of this plugin already serves /__dsh-plugin-manager in this process — this fiber serves nothing (…)`（双实例可见，而非只剩一句 duplicate route）。
+
+> 说明：dshmarket 的热挂载由第三方插件发起，本插件**不阻止**第二次加载，只保证任一副本都解析到同一个真 profile（因此 hot 实例写出的激活行与 bundle 实例读到的是同一份 `cordis.patch.yml`）。

@@ -37,11 +37,14 @@ dsh plugin --profile web add git+https://github.com/Chen5173/dsh-plugins.git
 宿主半每次启动会把一份诊断快照写到 `<profile>/.plugin-manager/host-diag.json`（**只在装进 profile 时写**，在仓库里跑测试不会留文件）：
 
 - `httpMounted` / `endpointsRegistered`：路由是否真的挂上。
-- `httpSkipped`：没挂上的原因原文（`webServer service is not available`、`register failed: webserver: duplicate route …` 等）。
+- `httpSkipped`：没挂上的原因原文（`webServer service is not available`、`register failed: webserver: duplicate route …` 等）。**0.3.15 起点名同进程的孪生实例**：同一个 `src/index.js` 被 dshmarket 的免重启热挂载在**同一进程**里加载第二次时，两个 fiber 只有一个能持有 `(kind:'prefix', path:'/__dsh-plugin-manager')`，输的那个写成 `another instance of this plugin already serves /__dsh-plugin-manager in this process — this fiber serves nothing (…)`。
 - `applyError` / `applyErrorStack`：`apply()` 本体抛错时的前 8 帧；`settingsError`：设置段失败的原因。
 - `yamlResolved` / `yamlVersion` / `yamlFlavor` / `yamlError`：profile 那份 `js-yaml` 解析到没有、什么版本、走的哪族 API（`type-extend` = 4.x；`define-tag` = 5.x）、不可用时的原因原文。
+- `profileSource`：这次是怎么认出 profile 的 —— `config`（显式配置且目录存在）/ `baseUrl`（由运行中的 loader 给出并已锚回 `$DSH_HOME/profiles/<名字>`）/ `baseUrl-raw`（锚不上，按原样使用该目录）/ `default`（回退 `web`）。
 
 配合 stderr 上的一行 `dsh-plugin-manager: …`，这几项足以判断是「宿主没起来」、「路由被占」还是「设置段连累」。
+
+**两个实例的识别**：dshmarket 的免重启热挂载会把本插件在同一进程里再加载一次（条目 id `mkt-dsh-plugin-manager`，来自 `<profile>/.dsh-market/hot-<n>.yml`）。两个实例共享模块级状态，但只有一个能持有 `/__dsh-plugin-manager` 前缀路由 —— 输的那个在诊断文件里留下上面那句 `another instance …`；诊断文件**只保留最后一个写入者**，所以它与面板顶部显示的 profile 不一致时，就是双实例在场。重启 DSH 即回到单实例（热挂载目录每次启动都会被清空）。
 
 ### 退役的子插件不会出现在面板里
 
@@ -66,7 +69,7 @@ dsh plugin --profile web add git+https://github.com/Chen5173/dsh-plugins.git
 - 退役插件的存量清理：摘掉 `RETIRED_PLUGIN_DIRS` 名单内插件的 `cordis.patch.yml` 激活行、`package.json` 依赖键（不跑 pnpm）与 `node_modules/<包名>` **链接点**（junction/symlink/断链，真实目录绝不动），详见上文「退役的子插件」小节。
 - 需要装依赖时在 profile 目录执行 `pnpm install`。
 - YAML 处理用 profile 自带的 `js-yaml`，**4.x 与 5.x 都支持**：启动时按 API 特征探测（4.x = `new Type(...)` + `JSON_SCHEMA.extend`；5.x = `defineScalarTag` + `JSON_SCHEMA.withTags`），两族等价处理，`!!js` 标量的往返语义不变。profile 里**完全没有** js-yaml 时自动 `pnpm add -D js-yaml` 一次；若解析到的是**两族都不认识**的版本，则**不安装、不改动** profile 依赖（那份很可能是别的插件的传递依赖），只在诊断里记 `yamlError` 并降级运行（面板照常可用，依赖 YAML 的功能给出可读错误）。
-- 默认管理**当前正在运行的那个 profile**。没有 Web 界面可探测时（例如 headless 宿主）回退到 `$DSH_HOME/profiles/<config.profile || 'web'>` —— 要改这个回退目标，在 `dsh.profile.bundles` 里本插件行加 `config: { profile: '名字' }`。
+- 默认管理**当前正在运行的那个 profile**：目录由运行中的 loader 给出的 `ctx.baseUrl` 决定，并**锚回** `$DSH_HOME/profiles/<名字>` —— `ctx.baseUrl` 不一定是 profile 目录本身（dshmarket 的热挂载把它设成 `<profile>/.dsh-market/`，0.3.14 及以前据此认定出一个名为 `.dsh-market` 的幽灵 profile：面板列空、开关报 `copyfile … ENOENT`，而真正的激活行在 desktop）。锚不上时（自定义布局）才按原样使用该目录。`config: { profile: '名字' }` 在该目录**存在**时优先于 `ctx.baseUrl`；没有 Web 界面可探测时（例如 headless 宿主）回退到 `$DSH_HOME/profiles/<config.profile || 'web'>`。
 - 除以上之外不写任何持久数据。
 
 ## 卸载 / 回滚

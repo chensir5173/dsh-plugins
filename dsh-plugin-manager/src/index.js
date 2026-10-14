@@ -53,9 +53,7 @@ import {
   removePlan,
   mergeIntent,
   dshHome,
-  profileDirOf,
-  patchPathOf,
-  manifestPathOf,
+  resolveProfile,
   repoRootOfPluginSrc,
   listRepoPluginDirs,
   readPluginMeta,
@@ -91,6 +89,8 @@ export const HOST_DIAG = {
   repoRoot: REPO_ROOT,
   pluginsRoot: PLUGINS_ROOT,
   profileName: DEFAULT_PROFILE,
+  /** How resolveContext() picked the profile: config | baseUrl | baseUrl-raw | default. */
+  profileSource: null,
   endpointsRegistered: false,
   yamlResolved: false,
   /** Version/flavour of the profile's resolved js-yaml copy (null when unresolved). */
@@ -352,33 +352,54 @@ function writeJsonPretty(file, obj) {
 // --- resolution --------------------------------------------------------------
 
 /**
- * Resolve the context the manager operates on. Profile directory comes from the
- * running loader's ctx.baseUrl (file URL of <profile>/), falling back to
- * $DSH_HOME/profiles/<config.profile || 'web'> when no web surface exists.
+ * Resolve the context the manager operates on.
+ *
+ * Profile directory comes from the running loader's ctx.baseUrl (the file URL of
+ * <profile>/), falling back to $DSH_HOME/profiles/<config.profile || 'web'> when no
+ * web surface exists. 0.3.15: ctx.baseUrl is NOT always the profile directory —
+ * dshmarket's restart-free hot mount attaches an Include subtree whose baseUrl is
+ * <profile>/.dsh-market/, which used to be taken at face value. The panel then
+ * reported a phantom profile named '.dsh-market' and every patch/manifest path
+ * pointed at a directory that does not exist (empty plugin list, `copyfile … ENOENT`
+ * on every toggle), while the real activation rows sat in the profile that was
+ * actually running. profileAnchorOf() walks any such path back to
+ * $DSH_HOME/profiles/<name>, and every derived path is built from profileDir —
+ * never from the display name.
  */
 function resolveContext(config, baseUrl) {
   const home = dshHome()
-  let profileDir = null
-  let profileName = config && typeof config.profile === 'string' && config.profile.trim() !== ''
-    ? config.profile.trim()
-    : null
+  let baseUrlDir = null
   if (baseUrl) {
-    try {
-      profileDir = fileURLToPath(baseUrl)
-    } catch { profileDir = null }
+    try { baseUrlDir = fileURLToPath(baseUrl) } catch { baseUrlDir = null }
   }
-  if (!profileDir) profileDir = profileDirOf(home, profileName || DEFAULT_PROFILE)
-  if (!profileName) profileName = path.basename(profileDir)
+  const picked = resolveProfile({
+    home,
+    baseUrlDir,
+    configured: config && typeof config.profile === 'string' ? config.profile : null,
+    dirExists: (p) => {
+      try { return fs.statSync(p).isDirectory() } catch { return false }
+    },
+  })
+  const profileDir = picked.profileDir
   return {
     home,
-    profileName,
+    profileName: picked.profileName,
     profileDir,
-    patchFile: patchPathOf(home, profileName),
-    manifestFile: manifestPathOf(home, profileName),
+    /** How the profile was picked: config | baseUrl | baseUrl-raw | default. */
+    profileSource: picked.source,
+    // Derived from profileDir on purpose: profileName is a label (panel, CLI
+    // --profile flag), never a path segment.
+    patchFile: path.join(profileDir, 'cordis.patch.yml'),
+    manifestFile: path.join(profileDir, 'package.json'),
     workspaceFile: path.join(profileDir, WORKSPACE_FILE),
     repoRoot: REPO_ROOT,
     pluginsRoot: PLUGINS_ROOT,
   }
+}
+
+/** Test-only: resolve the operating context without a DSH host. */
+export function __resolveContext(config, baseUrl) {
+  return resolveContext(config, baseUrl)
 }
 
 /** Nearest package.json version of the resolved js-yaml copy (diagnostics only). */
@@ -1063,6 +1084,7 @@ function registerHttp(ctx, host, config) {
           repoRoot: c.repoRoot,
           pluginsRoot: c.pluginsRoot,
           profileName: c.profileName,
+          profileSource: c.profileSource,
           profileDir: c.profileDir,
           patchFile: c.patchFile,
           endpointsRegistered: true,
@@ -1482,9 +1504,16 @@ function registerHttp(ctx, host, config) {
       // previous registration was never released — used to escape apply() and roll back
       // EVERY effect of this plugin. The panel then kept calling a route nobody served
       // and could only report the JSON-parse error of a 404 with an empty body.
+      const msg = (e && e.message) || String(e)
       HOST_DIAG.endpointsRegistered = false
       HOST_DIAG.httpMounted = false
-      HOST_DIAG.httpSkipped = `register failed: ${(e && e.message) || String(e)}`
+      // 0.3.15: the common cause is not a broken route but a TWIN — dshmarket's
+      // restart-free hot mount loads the same src/index.js a second time (entry id
+      // `mkt-<name>`) into the same process, and only one fiber can own (kind, path).
+      // Naming the twin is what turns "duplicate route" from a red herring into a fact.
+      HOST_DIAG.httpSkipped = /duplicate/i.test(msg)
+        ? `another instance of this plugin already serves ${HTTP_PREFIX} in this process — this fiber serves nothing (${msg})`
+        : `register failed: ${msg}`
       process.stderr.write(`dsh-plugin-manager: ${HOST_DIAG.httpSkipped}\n`)
       writeHostDiag(ctx, __cfg)
       return () => {}
@@ -1577,6 +1606,7 @@ function apply(ctx, config = {}) {
 function applyHost(ctx, config = {}) {
   const c0 = resolveContext(config, ctx && ctx.baseUrl)
   HOST_DIAG.profileName = c0.profileName
+  HOST_DIAG.profileSource = c0.profileSource
   HOST_DIAG.repoRoot = c0.repoRoot
   // NOTE: the workspace snapshot (and every other YAML consumer) runs at the END of
   // this function, after mountHttp(): an unsupported js-yaml copy used to throw here

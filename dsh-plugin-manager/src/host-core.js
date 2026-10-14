@@ -101,6 +101,79 @@ export function manifestPathOf(home, name = DEFAULT_PROFILE) {
   return path.join(profileDirOf(home, name), 'package.json')
 }
 
+/**
+ * 功能作用：把一个「可能是 profile 目录、也可能只是 profile 里的子目录或文件」的路径锚定回
+ *           `$DSH_HOME/profiles/<name>` 这一层，返回真正的 profile 名与目录（纯函数，不碰磁盘）。
+ * 为什么需要：dshmarket 的免重启热挂载把 `<profile>/.dsh-market/hot-<n>.yml` 挂成一个 Include
+ *           子树，那条条目的 ctx.baseUrl 因此是 `<profile>/.dsh-market/`，不再是 profile 目录本身。
+ *           直接取 basename 会得到 `.dsh-market` 这种伪 profile 名，于是 profileName 被拿去拼
+ *           `$DSH_HOME/profiles/.dsh-market/{cordis.patch.yml,package.json}`（不存在）——面板顶部
+ *           显示「目标 profile .dsh-market」、列表全空、每次开关都 `copyfile … ENOENT`，而真正生效
+ *           的激活行就在同一台机器上正在跑的那个 profile 里。
+ * 参数：
+ *   home: string -- $DSH_HOME，例 'C:/Users/x/.dsh'
+ *   dir: string -- 起点路径，目录或文件皆可，可带尾部分隔符，
+ *                  例 'C:/Users/x/.dsh/profiles/desktop/.dsh-market/hot-1.yml'
+ * 返回值：
+ *   object|null -- { profileDir, profileName }；起点不在 <home>/profiles 之下时返回 null
+ * 调用样例：
+ *   profileAnchorOf('C:/Users/x/.dsh', 'C:/Users/x/.dsh/profiles/desktop/.dsh-market/')
+ *   // → { profileDir: 'C:\\Users\\x\\.dsh\\profiles\\desktop', profileName: 'desktop' }
+ */
+export function profileAnchorOf(home, dir) {
+  if (typeof home !== 'string' || home.trim() === '') return null
+  if (typeof dir !== 'string' || dir.trim() === '') return null
+  const root = path.resolve(home, 'profiles')
+  let cur = path.resolve(dir)
+  for (let hops = 0; hops < 32; hops += 1) {
+    const rel = path.relative(root, cur)
+    if (rel !== '' && rel !== '.' && !rel.startsWith('..') && !path.isAbsolute(rel)) {
+      const first = rel.split(/[\\/]/).filter((part) => part !== '' && part !== '.')[0]
+      if (first) return { profileDir: path.join(root, first), profileName: first }
+    }
+    const up = path.dirname(cur)
+    if (up === cur) break
+    cur = up
+  }
+  return null
+}
+
+/**
+ * 功能作用：决定这次实例该管哪个 profile（纯函数；目录是否存在由调用方注入，便于离线单测）。
+ *           优先级：显式配置且目录真的存在 > ctx.baseUrl 锚定 > 无法锚定时的原始 baseUrl 目录 >
+ *           显式配置（目录尚未创建）> 默认 profile。显式配置只在目录存在时优先，是为了让历史上
+ *           写坏的 `profile: '.dsh-market'` 不再把写入引向一个不存在的 profile。
+ * 参数：
+ *   input: object -- { home, baseUrlDir?, configured?, dirExists? }
+ * 返回值：
+ *   object -- { profileDir, profileName, source }，source ∈ 'config' | 'baseUrl' | 'baseUrl-raw' | 'default'
+ * 调用样例：
+ *   resolveProfile({ home, baseUrlDir: 'C:/Users/x/.dsh/profiles/desktop/.dsh-market' })
+ *   // → { profileDir: 'C:\\Users\\x\\.dsh\\profiles\\desktop', profileName: 'desktop', source: 'baseUrl' }
+ */
+export function resolveProfile(input = {}) {
+  const home = typeof input.home === 'string' ? input.home : ''
+  const configured = typeof input.configured === 'string' && input.configured.trim() !== ''
+    ? input.configured.trim()
+    : null
+  const dirExists = typeof input.dirExists === 'function' ? input.dirExists : () => true
+  const exists = (dir) => { try { return Boolean(dir) && Boolean(dirExists(dir)) } catch { return false } }
+  const configuredDir = configured ? profileDirOf(home, configured) : null
+  if (configuredDir && exists(configuredDir)) {
+    return { profileDir: configuredDir, profileName: configured, source: 'config' }
+  }
+  const anchor = profileAnchorOf(home, input.baseUrlDir)
+  if (anchor) return { ...anchor, source: 'baseUrl' }
+  const rawDir = typeof input.baseUrlDir === 'string' && input.baseUrlDir.trim() !== ''
+    ? path.resolve(input.baseUrlDir)
+    : null
+  if (rawDir) {
+    return { profileDir: rawDir, profileName: path.basename(rawDir) || DEFAULT_PROFILE, source: 'baseUrl-raw' }
+  }
+  if (configuredDir) return { profileDir: configuredDir, profileName: configured, source: 'config' }
+  return { profileDir: profileDirOf(home, DEFAULT_PROFILE), profileName: DEFAULT_PROFILE, source: 'default' }
+}
+
 /** <repo>/dsh-plugin-manager/src → <repo> (the scanned sibling root). */
 export function repoRootOfPluginSrc(srcDir) {
   return path.resolve(srcDir, '..', '..')
