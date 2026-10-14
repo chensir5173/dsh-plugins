@@ -75,11 +75,6 @@ import {
   workspaceStateOf,
   pluginRootsOf,
 } from './host-core.js'
-import {
-  safeUpdateView,
-  prepareSafeUpdate,
-  clearSafeUpdate,
-} from './safe-update.js'
 
 const name = 'dsh-plugin-manager'
 const inject = []
@@ -132,8 +127,6 @@ export const HOST_DIAG = {
   workspaceRepair: null,
   /** Last sweep of retired-plugin residue: patch rows + manifest keys + node_modules links. */
   retiredSweep: null,
-  /** Last safe-update outcome (prepare/cancel). Nothing is installed until the user runs the script. */
-  safeUpdate: null,
 }
 
 // --- settings: the automatic relink switch (optional capability) -------------
@@ -872,9 +865,6 @@ function listPayload(s) {
         repoGlobs: s.workspace.state.repoGlobs,
         error: s.workspace.error || null,
       } : null,
-      // Safe update face: staging only. The panel writes a record + a script; the
-      // actual replacement happens after the host has exited (see safe-update.js).
-      safeUpdate: safeUpdateView({ profileDir: s.c.profileDir, manifest: s.manifest }),
       autoRelink: HOST_DIAG.autoRelink,
       autoRelinkEnabled: __autoRelink === true,
       // Retired-residue sweep outcome: { at, changed, rows, keys, unlinked, backups, error }.
@@ -1050,26 +1040,6 @@ async function dropDevDeps(c, names) {
  * Skipped when the resolved directory is not a real profile (no cordis.yml /
  * cordis.patch.yml, or the repo root itself), so tests and odd anchors stay clean.
  */
-/**
- * 功能作用：从宿主 baseUrl 取出监听端口，写进待更新记录（脚本用端口判断 DSH 是否真的退出）。
- * 参数：baseUrl: string -- ctx.baseUrl
- * 返回值：number|null
- * 调用样例：hostPortOf(ctx.baseUrl)
- */
-function hostPortOf(baseUrl) {
-  try {
-    const u = new URL(String(baseUrl || ''))
-    // A file:// baseUrl (the shape a hot-mounted dshmarket tree leaves behind) has no
-    // port: report null so the script falls back to PID-only waiting instead of
-    // polling some unrelated port.
-    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null
-    if (u.port) return Number(u.port)
-    return u.protocol === 'https:' ? 443 : 80
-  } catch {
-    return null
-  }
-}
-
 function writeHostDiag(ctx, config, resolved) {
   try {
     const c = resolved || resolveContext(config || {}, ctx && ctx.baseUrl)
@@ -1136,49 +1106,6 @@ function registerHttp(ctx, host, config) {
 
       if (url === `${HTTP_PREFIX}/list` && method === 'GET') {
         sendJson(res, 200, listPayload(snapshot(ctx, __cfg)))
-        return
-      }
-
-      if ((url === `${HTTP_PREFIX}/update/prepare` || url === `${HTTP_PREFIX}/update/cancel`) && method === 'POST') {
-        let args = {}
-        const body = await readBody(req)
-        if (body) {
-          try { args = JSON.parse(body) } catch { sendJson(res, 400, { ok: false, error: 'bad json body' }); return }
-        }
-        const c = resolveContext(__cfg, ctx && ctx.baseUrl)
-        const manifest = readManifest(c.manifestFile)
-        const view = (extra) => ({ ...safeUpdateView({ profileDir: c.profileDir, manifest }), ...(extra || {}) })
-        if (url === `${HTTP_PREFIX}/update/cancel`) {
-          const out = clearSafeUpdate(c.profileDir)
-          HOST_DIAG.safeUpdate = { at: Date.now(), action: 'cancel', hadPending: out.hadPending, removed: out.removed, error: null }
-          writeHostDiag(ctx, __cfg, c)
-          sendJson(res, 200, { ...listPayload(snapshot(ctx, __cfg)), safeUpdate: view({ cancelled: true, removed: out.removed }) })
-          return
-        }
-        const names = Array.isArray(args.targets) ? args.targets.map((x) => String(x)) : []
-        const out = prepareSafeUpdate({
-          profileDir: c.profileDir,
-          profileName: c.profileName,
-          manifest,
-          names,
-          hostPid: process.pid,
-          hostPort: hostPortOf(ctx && ctx.baseUrl),
-        })
-        HOST_DIAG.safeUpdate = {
-          at: Date.now(),
-          action: 'prepare',
-          ok: out.ok,
-          error: out.error || null,
-          targets: out.ok ? out.record.targets.map((t) => t.name) : [],
-          skipped: out.skipped || [],
-          scriptPath: out.scriptPath || null,
-        }
-        writeHostDiag(ctx, __cfg, c)
-        if (!out.ok) {
-          sendJson(res, 400, { ok: false, error: out.error, skipped: out.skipped || [], data: { ...listPayload(snapshot(ctx, __cfg)).data } })
-          return
-        }
-        sendJson(res, 200, { ...listPayload(snapshot(ctx, __cfg)), safeUpdate: view({ prepared: true, skipped: out.skipped }) })
         return
       }
 

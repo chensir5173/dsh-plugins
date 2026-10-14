@@ -289,19 +289,3 @@ Windows junction 识别是本次的硬骨头：pnpm 的 `link:` 目录在 Window
 - [ ] 需真机：热挂载再次把本插件加载第二次时，`host-diag.json` 的 `httpSkipped` 应出现 `another instance of this plugin already serves /__dsh-plugin-manager in this process — this fiber serves nothing (…)`（双实例可见，而非只剩一句 duplicate route）。
 
 > 说明：dshmarket 的热挂载由第三方插件发起，本插件**不阻止**第二次加载，只保证任一副本都解析到同一个真 profile（因此 hot 实例写出的激活行与 bundle 实例读到的是同一份 `cordis.patch.yml`）。
-
-## A21 安全更新：面板只登记，替换放到退出之后（2026-10-14）
-
-动机：用户先报「更新了 plugins 插件后为什么卡住 dsh desktop，逼得我得重新启动 dsh」，随后要求「让这替换的步骤放在重启后，更新后提醒用户重启，而不是直接卡死」。取证：`.dsh-market/log.ndjson` 的 update 事件显示更新就是 `pnpm` 在 DSH 进程内就地落盘；桌面版自带的官方管理器（`@deepseek-ai/dsh-plugin-manager` 0.2.0-rc.2）本身也是「运行中落盘 + reload + `restart-required`」语义。Windows 上 DSH 正在加载的文件被 pnpm 覆盖会 `EBUSY` / `EPERM`，所以「运行中替换」必然要重试甚至卡住 —— 这不是本插件的 bug，而是时机问题。
-
-做法：新增 `src/safe-update.js`（宿主半纯逻辑 + 脚本渲染）。`prepareSafeUpdate()` **只写** `<profileDir>/.plugin-manager/` 下的 `update-pending.json` 与 `apply-update.cmd`（POSIX 下 `apply-update.sh`）：不跑 pnpm、不动 `node_modules`、不改 `package.json` / `cordis.patch.yml`。可更新目标只能来自 manifest 已声明的 `dependencies` / `devDependencies`，其中 `link:` / `workspace:` / `file:` 归为 `local-source` 排除，更新参数由规格派生（git 规格去掉 `#` 之后的 ref；registry 规格 `<name>@latest`）⇒ 请求无法注入任意命令。`index.js` 新增 `POST /__dsh-plugin-manager/update/prepare`（body `{targets:[names]}`）与 `POST …/update/cancel`；`safeUpdate` 视图挂进 `listPayload()`，因此 `/list` 与所有 POST 响应都自带该状态（面板不必多发一次请求）；诊断文件新增 `safeUpdate`。脚本的等待判据 = **宿主 pid 消失 且 端口不再 LISTEN**（`hostPortOf()` 只认 http/https，`file://` 时退化为只等 pid），默认最多 300 秒；落盘前备份 `package.json` 与 `pnpm-lock.yaml`，PATH 里没有 pnpm 时回退 `dsh plugin --profile <名字> add <规格>`，失败打印回滚命令并在退出前 pause 让人读到结果。
-
-- [x] 自动化（纯函数，`safe-update.test.mjs`）：`isSafeProfileName` 收 `desktop`、拒 `..` 与 `a; rm -rf /`；`depKindOf` 分族（link/workspace/file/git/registry）；目标提取与参数派生（`github:chensir5173/dsh-plugins#4c4325f…` → `github:chensir5173/dsh-plugins`；`dsh-context 0.70.0` → `dsh-context@latest`）；`link:` 目标 skipped reason `local-source`、未知名字 `unknown`；空选 error `no target selected`。
-- [x] 自动化（端到端，临时 `$DSH_HOME` + 真 `registerHttp`）：`POST /update/prepare` 返回 200 且 **pnpm 零调用**（`__setPnpmRunner` 计数桩不变）；pending 记录含 `profileName` / `hostPid`；脚本含 `pnpm add "github:chensir5173/dsh-plugins"` 与 `tasklist` 等待循环；`package.json` 与 `cordis.patch.yml` **字节不变**、`node_modules` 目录列表不变、没有产生 `*.bak-*`。
-- [x] 自动化（同上）：prepare 后 `/list` 的 `safeUpdate.pending` 可见、`scriptExists` 为 true；`POST /update/cancel` 之后 pending 归 `null`、脚本被删，而 profile 里的文件仍字节不变。
-- [x] 自动化（同上）：非法输入（`{targets:['nope']}` 与 `{targets:[]}`）→ 400 + `no target selected`，且不产生任何文件；`HOST_DIAG.safeUpdate.action` 记为 `prepare`。
-- [x] 回归：管理器 11 支全绿（新增 `safe-update`；`bundle` 的面板渲染用例覆盖新的客户端区块）。
-- [ ] 需真机：装 0.3.16 → 面板勾选目标 →「准备更新」→ **完全退出 DSH** → 双击 `<profile>/.plugin-manager/apply-update.cmd` → 重启后面板显示的版本已变化；`update-apply.ndjson` 里能看到每个目标的 exit 码。
-- [ ] 需真机：脚本在 DSH 未退出时运行应停在等待循环（不替换任何文件），300 秒超时后以非 0 退出码结束，且 profile 文件未被触碰。
-
-> 说明：面板不做「更新完自动重启」——桌面版由自己的外壳托管（官方 rc.2 也要求完全退出后才接受 `dsh plugin --profile desktop`），本插件只负责把「要更新什么」登记清楚、把替换挪到没有进程占用的窗口里，并在失败时留下备份与回滚命令。

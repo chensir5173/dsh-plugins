@@ -29,7 +29,6 @@ dsh plugin --profile web add git+https://github.com/Chen5173/dsh-plugins.git
 - **执行期锁定**：批量进行中（可能正在装依赖）所有开关、移除与「一键迁移」都禁用并显示「处理中…」。
 - **连点会合并**：短时间内多次开关只落盘一次。落盘会让核心重应用整棵配置树，界面可能短暂无响应。
 - **没有**撤销按钮，也不会自动迁移旧布局。「全部移除」只摘依赖键与激活行，**不会删除**仓库里的子插件目录，所以恢复成本 = 重新点一次「全部开启」。
-- **安全更新（退出后再落盘）**：面板下方列出**可安全更新**的依赖（`git` / registry 规格；本地 `link:` / `file:` / `workspace:` 依赖不在列，避免把本仓库的链接改坏）。勾选后点「准备更新」只会生成 `<profile>/.plugin-manager/apply-update.cmd`（POSIX 下 `apply-update.sh`）与一份待更新记录——**这一步不装任何东西、不改任何 profile 文件**。完全退出 DSH 后运行该脚本：它先等到宿主进程与端口都空闲、备份 `package.json` / `pnpm-lock.yaml`，再对每个目标跑 `pnpm add <规格>`（PATH 里没有 pnpm 时回退 `dsh plugin --profile <名字> add <规格>`）；失败打印回滚命令，退出前暂停让你读到结果。点了「取消准备」只删这两个文件。
 
 ### 面板报错怎么自查
 
@@ -63,15 +62,6 @@ dsh plugin --profile web add git+https://github.com/Chen5173/dsh-plugins.git
 > **已退役实例的存量清理（0.3.12 起自动）**：退役前已激活过的 profile 会留三种残留——`cordis.patch.yml` 的激活行（DSH 插件列表里那个「幽灵条目」）、`package.json` 的依赖键、`node_modules/<包名>` 的链接点。宿主每次启动会自动清一次（也挂在每次安装/迁移之前）：先快照、真有残留才先备份再改写，干净时零写入；键清掉**不跑** pnpm（下次任何 install 自然同步），`node_modules` 只删**链接点**（symlink / junction / 断链），真实目录与管理器自己的 `sub-plugins` 镜像绝不动。清理结果记在 `/status` 的 `hostDiag.retiredSweep`。
 >
 > 历史：`dsh-hindsight-model`（2026-10-10 desktop profile）是唯一一次手动收尾——当时管理器还带不动清理，靠手工删行；此后同类问题不再需要人工。恢复一个退役插件 = 把名字从 `RETIRED_PLUGIN_DIRS` 删掉 + 重新点开它（清理只会删 retired 名单里的行）。
-
-### 为什么不在这里直接替换（更新卡住的由来）
-
-**运行中替换 = pnpm 去覆盖正被 DSH 加载的文件**。Windows 上这些文件被占用，pnpm 只能重试或报 `EBUSY` / `EPERM`，用户看到的就是「点了更新，界面卡住，只能重启」。所以本面板把两件事拆开：**登记要更新什么**（随时可做，零副作用）与**替换文件**（必须在 DSH 退出后）。
-
-- 期间文件只有三个，都在 `<profile>/.plugin-manager/` 下：`update-pending.json`（目标、脚本路径、生成时的宿主 pid 与端口）、`apply-update.cmd` / `apply-update.sh`（替换脚本）、`update-apply.ndjson`（脚本自己的执行日志）。**它们都不进 profile 的依赖与激活行**，所以面板与 DSH 的加载状态都不会因此变化。
-- 脚本等待的判据是「宿主 pid 已消失 **且** 端口不再 LISTEN」（两样都拿不到就跳过等待），默认最多等 300 秒；超时不动任何文件，提示你彻底退出（含托盘）后再运行一次。
-- 更新参数由**已声明的依赖规格**派生，面板只能勾选 manifest 里已有的名字：请求里传不了任意命令，脚本里也不会拼出用户没声明过的包。
-- 「取消准备」只删待更新记录与脚本（不动任何本机配置）；替换失败时备份仍在，按脚本打印的 `copy /Y` 命令即可回滚。
 
 ## 它会改动你机器上的什么
 

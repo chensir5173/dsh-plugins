@@ -88,18 +88,6 @@ window.__ModuleLoader__.load({
       hostDown: '插件宿主没有响应（HTTP {status}）：宿主半没有挂载 /__dsh-plugin-manager 路由。请重启 DSH 后重试；若仍然如此，打开「设置 → 插件」查看 dsh-plugin-manager 条目的状态与报错。',
       hostNotJson: '插件宿主返回了非 JSON 响应（HTTP {status}）：端点未注册或已被回滚。',
       hostOffline: '连接插件宿主失败（{reason}）：DSH 可能正在重启，稍后点「刷新」重试。',
-      safeUpdateTitle: '安全更新（退出后再落盘）',
-      safeUpdateBody: '这里只登记要更新的插件并生成一个脚本，本机文件不会被替换。完全退出 DSH 后运行该脚本，替换期间没有进程占用文件，就不会再卡住。',
-      safeUpdatePick: '要更新的插件',
-      safeUpdatePrepare: '准备更新',
-      safeUpdatePrepared: '已准备更新，脚本已生成——完全退出 DSH 后再运行它。',
-      safeUpdatePending: '待更新：{n} 个（脚本已就绪）',
-      safeUpdateRunHint: '运行方式：先完全退出 DSH（含托盘图标），再双击下面的脚本。脚本会等到进程真的退出才开始替换；失败时会打印回滚命令，本机文件在替换前已自动备份。',
-      safeUpdateCopy: '复制脚本路径',
-      safeUpdateCopied: '脚本路径已复制到剪贴板',
-      safeUpdateCancel: '取消准备',
-      safeUpdateCancelled: '已取消待更新（没有修改任何本机文件）',
-      safeUpdateNone: '没有可安全更新的插件（本地路径 / link: 依赖要手动处理）。',
       hasClientTag: '带界面',
     }
     const enDict = {
@@ -161,18 +149,6 @@ window.__ModuleLoader__.load({
       hostDown: 'The plugin host did not answer (HTTP {status}): its /__dsh-plugin-manager route is not mounted. Restart DSH and retry; if this persists, open Settings > Plugins and check the dsh-plugin-manager entry state.',
       hostNotJson: 'The plugin host returned a non-JSON response (HTTP {status}): the endpoint is not registered or was rolled back.',
       hostOffline: 'Could not reach the plugin host ({reason}): DSH may be restarting; retry with Refresh in a moment.',
-      safeUpdateTitle: 'Safe update (install after exit)',
-      safeUpdateBody: 'This only records which plugins to update and writes a script — nothing on disk is replaced here. Quit DSH completely, then run that script: nothing holds the files, so the replacement cannot hang.',
-      safeUpdatePick: 'Plugins to update',
-      safeUpdatePrepare: 'Prepare update',
-      safeUpdatePrepared: 'Update prepared — the script is ready. Run it after quitting DSH completely.',
-      safeUpdatePending: 'Pending update: {n} (script ready)',
-      safeUpdateRunHint: 'How to run: quit DSH completely (including the tray icon), then double-click the script below. It waits until the process is really gone before replacing anything; on failure it prints the rollback command, and the profile files are backed up first.',
-      safeUpdateCopy: 'Copy script path',
-      safeUpdateCopied: 'Script path copied',
-      safeUpdateCancel: 'Cancel',
-      safeUpdateCancelled: 'Pending update cancelled (no local file was touched)',
-      safeUpdateNone: 'No safely updatable plugins (local-path / link: dependencies must be handled by hand).',
       hasClientTag: 'UI',
     }
     const t = (key) => {
@@ -365,8 +341,6 @@ window.__ModuleLoader__.load({
       const [notice, setNotice] = useState(null) // {type:'ok'|'err'|'warn', text}
       const [needReload, setNeedReload] = useState(false)
       const [applying, setApplying] = useState(false)
-      // null = follow the host's suggested target set; an array = the user's own picks.
-      const [pick, setPick] = useState(null)
       const seq = useRef(0)
       const applySeq = useRef(0)
 
@@ -484,32 +458,6 @@ window.__ModuleLoader__.load({
           setNeedReload(true)
           setNotice({ type: 'ok', text: `${t('migrate')} ✓ · ${t('reloadHint')}` })
         })
-      }
-
-      // Safe update face: the host hands back the updatable targets plus whatever
-      // update record is already staged. Preparing never installs anything.
-      const safeUpdate = (data && data.safeUpdate) || null
-      const upTargets = (safeUpdate && safeUpdate.targets) || []
-      const picked = pick == null ? ((safeUpdate && safeUpdate.suggested) || []) : pick
-      const togglePick = (n) => setPick(picked.includes(n) ? picked.filter((x) => x !== n) : picked.concat([n]))
-      const prepareUpdate = () => {
-        run(`${API}/update/prepare`, { targets: picked }, 'update-prepare').then((json) => {
-          if (!json) return
-          setNotice({ type: 'ok', text: t('safeUpdatePrepared') })
-        })
-      }
-      const cancelUpdate = () => {
-        run(`${API}/update/cancel`, {}, 'update-cancel').then((json) => {
-          if (!json) return
-          setNotice({ type: 'ok', text: t('safeUpdateCancelled') })
-        })
-      }
-      const copyScriptPath = () => {
-        const p = (safeUpdate && safeUpdate.scriptPath) || ''
-        try {
-          if (typeof navigator !== 'undefined' && navigator.clipboard) void navigator.clipboard.writeText(p)
-        } catch { /* clipboard unavailable: the path stays visible */ }
-        setNotice({ type: 'ok', text: t('safeUpdateCopied') })
       }
 
       const plugins = (data && data.plugins) || []
@@ -658,37 +606,6 @@ window.__ModuleLoader__.load({
         React.createElement('div', { style: S.toolbar },
           React.createElement('div', { style: S.toolbarGroup }, batchButton('on'), batchButton('off'), batchButton('remove')),
           React.createElement('button', { style: S.button, onClick: load, disabled: Boolean(busy) }, t('refresh')),
-        ),
-        safeUpdate && React.createElement('div', { style: S.banner },
-          React.createElement('div', { style: { flex: 1, display: 'flex', flexDirection: 'column', gap: 6, minWidth: 0 } },
-            React.createElement('span', { style: { fontSize: 13, fontWeight: 600 } }, t('safeUpdateTitle')),
-            React.createElement('span', { style: { fontSize: 12 } }, t('safeUpdateBody')),
-            upTargets.length === 0
-              ? React.createElement('span', { style: { fontSize: 12 } }, t('safeUpdateNone'))
-              : React.createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 4 } },
-                  React.createElement('span', { style: { fontSize: 12 } }, t('safeUpdatePick')),
-                  upTargets.map((tg) => React.createElement('label', { key: tg.name, style: { display: 'flex', alignItems: 'center', gap: 6, fontSize: 12 } },
-                    React.createElement('input', {
-                      type: 'checkbox',
-                      checked: picked.includes(tg.name),
-                      disabled: Boolean(busy) || Boolean(safeUpdate.pending),
-                      onChange: () => togglePick(tg.name),
-                    }),
-                    React.createElement('span', null, `${tg.name} (${tg.kind})`),
-                    React.createElement('code', { style: { fontSize: 11, opacity: .7 } }, tg.arg || ''),
-                  )),
-                ),
-            safeUpdate.pending && React.createElement('span', { style: { fontSize: 12 } },
-              t('safeUpdatePending').replace('{n}', String((safeUpdate.pending.targets || []).length))),
-            safeUpdate.pending && React.createElement('code', { style: { fontSize: 12, wordBreak: 'break-all' } }, safeUpdate.scriptPath || ''),
-            safeUpdate.pending && React.createElement('span', { style: { fontSize: 12 } }, t('safeUpdateRunHint')),
-          ),
-          React.createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 6, flex: 'none' } },
-            safeUpdate.pending
-              ? React.createElement('button', { style: { ...S.button, ...S.buttonDanger }, disabled: Boolean(busy), onClick: cancelUpdate }, busy === 'update-cancel' ? t('busy') : t('safeUpdateCancel'))
-              : React.createElement('button', { style: { ...S.button, ...S.buttonPrimary, ...(picked.length === 0 ? S.buttonDisabled : {}) }, disabled: Boolean(busy) || picked.length === 0, onClick: prepareUpdate }, busy === 'update-prepare' ? t('busy') : t('safeUpdatePrepare')),
-            safeUpdate.pending && React.createElement('button', { style: S.button, onClick: copyScriptPath }, t('safeUpdateCopy')),
-          ),
         ),
         uninstall && React.createElement('div', { style: S.banner },
           React.createElement('div', { style: { flex: 1, display: 'flex', flexDirection: 'column', gap: 4 } },
