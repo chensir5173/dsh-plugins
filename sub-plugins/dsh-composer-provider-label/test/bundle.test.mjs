@@ -701,7 +701,7 @@ function pickerBoot(extra = {}) {
       },
     },
   }
-  const env = boot({ remote, sessions: extra.sessions, storage: extra.storage })
+  const env = boot({ language: extra.language, remote, sessions: extra.sessions, storage: extra.storage })
   env.writes = writes
   env.catalogCalls = catalogCalls
   return env
@@ -922,6 +922,126 @@ test('picker: choosing a provider drops an effort the new model does not support
   assert.deepEqual(env.writes, [{ sessionId: 's1', provider: 'bai', model: 'bai-plain' }])
 })
 
+test('picker: the root pane carries an effort row naming the effective tier', async () => {
+  const env = pickerBoot({
+    catalog: () => catalogOf({
+      default: { provider: 'ark', model: 'ark-high' },
+      groups: [
+        { id: 'ark', name: 'ARK', models: [{ id: 'ark-high', name: 'Ark High', reasoning: { efforts: [{ id: 'high', name: 'High' }, { id: 'low', name: 'Low' }], defaultEffort: 'high' } }] },
+      ],
+    }),
+  })
+  const tree = await openPicker(env, projectionOf({ provider: 'ark', model: 'ark-high' }))
+  const row = itemById(tree, 'effort')
+  assert.ok(row, 'the root pane carries an effort row')
+  assert.match(textOf(row.label), /推理档/)
+  assert.match(textOf(row.label), /High/, 'the row names the tier the route would use')
+  assert.deepEqual(env.writes, [], 'reading the row writes nothing')
+})
+
+test('picker: the effort pane ticks the current tier and writes the chosen one', async () => {
+  const env = pickerBoot({
+    catalog: () => catalogOf({
+      default: { provider: 'ark', model: 'ark-high' },
+      groups: [
+        { id: 'ark', name: 'ARK', models: [{ id: 'ark-high', name: 'Ark High', reasoning: { efforts: [{ id: 'high', name: 'High' }, { id: 'low', name: 'Low', description: 'cheaper' }], defaultEffort: 'high' } }] },
+      ],
+    }),
+  })
+  const route = { provider: 'ark', model: 'ark-high', reasoningEffort: 'high' }
+  let tree = await openPicker(env, projectionOf(route))
+  selectItem(tree, 'effort')
+  tree = env.rerender(compProps('s1', projectionOf(route)))
+  assert.ok(itemById(tree, 'effort:high'), 'every advertised tier is listed')
+  assert.ok(itemById(tree, 'effort:low'), 'including the ones the route does not use')
+  assert.ok(!itemById(tree, 'effort:default'), 'no provider-default row when the model declares a default')
+  assert.ok(menuProps(tree).selectedIds.includes('effort:high'), 'the effective tier is ticked')
+  selectItem(tree, 'effort:low')
+  await env.flush()
+  assert.deepEqual(env.writes, [{ sessionId: 's1', provider: 'ark', model: 'ark-high', reasoningEffort: 'low' }])
+})
+
+test('picker: the provider-default row submits a route without the effort field', async () => {
+  const env = pickerBoot({
+    catalog: () => catalogOf({
+      default: { provider: 'ark', model: 'ark-open' },
+      groups: [
+        { id: 'ark', name: 'ARK', models: [{ id: 'ark-open', name: 'Ark Open', reasoning: { efforts: [{ id: 'high', name: 'High' }] } }] },
+      ],
+    }),
+  })
+  const route = { provider: 'ark', model: 'ark-open', reasoningEffort: 'high' }
+  let tree = await openPicker(env, projectionOf(route))
+  selectItem(tree, 'effort')
+  tree = env.rerender(compProps('s1', projectionOf(route)))
+  assert.ok(menuProps(tree).selectedIds.includes('effort:high'), 'the explicit tier is ticked')
+  assert.ok(itemById(tree, 'effort:default'), 'the provider default leads the list')
+  selectItem(tree, 'effort:default')
+  await env.flush()
+  assert.deepEqual(env.writes, [{ sessionId: 's1', provider: 'ark', model: 'ark-open' }], 'no reasoningEffort key at all')
+})
+
+test('picker: a model without reasoning tiers shows an unsupported row and an empty pane', async () => {
+  const env = pickerBoot({
+    catalog: () => catalogOf({
+      default: { provider: 'ark', model: 'ark-plain' },
+      groups: [{ id: 'ark', name: 'ARK', models: [{ id: 'ark-plain', name: 'Ark Plain' }] }],
+    }),
+  })
+  const route = { provider: 'ark', model: 'ark-plain' }
+  let tree = await openPicker(env, projectionOf(route))
+  assert.match(textOf(itemById(tree, 'effort').label), /不支持/)
+  selectItem(tree, 'effort')
+  tree = env.rerender(compProps('s1', projectionOf(route)))
+  const empty = itemById(tree, 'effort:none')
+  assert.ok(empty, 'the pane explains the model has no tiers')
+  assert.equal(empty.disabled, true, 'and offers nothing to click')
+  assert.deepEqual(itemsOf(tree).filter((entry) => entry.id.startsWith('effort:') && entry.id !== 'effort:none'), [])
+  assert.deepEqual(env.writes, [], 'an unsupported model writes nothing')
+})
+
+test('picker: the effort row and pane follow the client language', async () => {
+  const env = pickerBoot({
+    language: 'en-US',
+    catalog: () => catalogOf({
+      default: { provider: 'ark', model: 'ark-plain' },
+      groups: [{ id: 'ark', name: 'ARK', models: [{ id: 'ark-plain', name: 'Ark Plain' }] }],
+    }),
+  })
+  const route = { provider: 'ark', model: 'ark-plain' }
+  let tree = await openPicker(env, projectionOf(route))
+  assert.match(textOf(itemById(tree, 'effort').label), /Effort/)
+  assert.match(textOf(itemById(tree, 'effort').label), /Unsupported/)
+  selectItem(tree, 'effort')
+  tree = env.rerender(compProps('s1', projectionOf(route)))
+  assert.match(textOf(itemById(tree, 'effort:none').label), /no reasoning tiers/)
+})
+
+test('pure: effortOptionsOf mirrors the catalog reasoning contract', () => {
+  const env = boot()
+  const pure = env.window.__cpl.pure
+  assert.deepEqual(pure.effortOptionsOf(null), [])
+  assert.deepEqual(pure.effortOptionsOf({ id: 'm' }), [], 'a model without reasoning advertises no tiers')
+  assert.deepEqual(pure.effortOptionsOf({ id: 'm', reasoning: { efforts: [] } }), [])
+  const open = pure.effortOptionsOf({ id: 'm', reasoning: { efforts: [{ id: 'high', name: 'High' }] } })
+  assert.deepEqual(open.map((option) => option.id), ['', 'high'], 'no declared default means the provider decides')
+  assert.equal(open[0].providerDefault, true)
+  assert.equal(open[1].name, 'High')
+  const pinned = pure.effortOptionsOf({ id: 'm', reasoning: { efforts: [{ id: 'high', name: 'High', description: 'best' }, { id: 'low' }], defaultEffort: 'high' } })
+  assert.deepEqual(pinned.map((option) => option.id), ['high', 'low'])
+  assert.equal(pinned[0].detail, 'best')
+  assert.equal(pinned[1].name, 'low', 'a tier without a name falls back to its id')
+  assert.deepEqual(
+    pure.effortOptionsOf({ id: 'm', reasoning: { defaultEffort: 'high' } }).map((option) => option.id),
+    ['high'],
+    'a declared default alone still counts as a tier',
+  )
+  assert.deepEqual(
+    pure.effortOptionsOf({ id: 'm', reasoning: { efforts: [{ id: 'low', name: 'Low' }], defaultEffort: 'high' } }).map((option) => option.id),
+    ['low', 'high'],
+    'a declared default missing from efforts still gets a row',
+  )
+})
 test('picker: model pane in "all" scope groups by provider with headings', async () => {
   const env = pickerBoot()
   let tree = await openPicker(env)

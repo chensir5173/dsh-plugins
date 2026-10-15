@@ -1,6 +1,6 @@
 # 验收清单 — dsh-composer-provider-label
 
-代码侧的 55 条逻辑断言已由 `test/bundle.test.mjs` 自动覆盖并通过。本清单覆盖**只有装起来在浏览器里才能确认**的部分：真实安装、composer 布局、菜单交互、tooltip 观感、语言切换、三路即时更新、以及「写操作范围」的回归。
+代码侧的 61 条逻辑断言已由 `test/bundle.test.mjs` 自动覆盖并通过。本清单覆盖**只有装起来在浏览器里才能确认**的部分：真实安装、composer 布局、菜单交互、tooltip 观感、语言切换、三路即时更新、以及「写操作范围」的回归。
 
 标 `[H]` 的条目 harness 已断言过，回归时抽查即可；标 `[B]` 的必须人眼看。
 
@@ -90,7 +90,7 @@ stat -c '%y %s' "$S"      # 记下 mtime 与大小
 
 ## 10. 选择菜单与显示范围（本轮扩展：extend-composer-provider-picker）
 
-- [ ] 10.1 `[B]` 点击标签 → 向上弹出菜单，根层两行「提供方 / 模型」，各显示当前值；只开菜单时路由不变
+- [ ] 10.1 `[B]` 点击标签 → 向上弹出菜单，根层三行「提供方 / 模型 / 推理档」，各显示当前值；只开菜单时路由不变
 - [ ] 10.2 `[B]` 进入提供方层 → 顶部「‹ 返回」；下面按目录顺序列出提供方（别名 + 登记名），当前项打勾
 - [ ] 10.3 `[B]` 某个 provider 的模型目录加载失败 → 该项置灰并显示失败原因；菜单顶部有「重试加载」且可点
 - [ ] 10.4 `[B]` 点选另一个提供方 → 立即切换（当前模型不属于它时改用它的默认/第一个模型），菜单自动进入模型层
@@ -107,6 +107,10 @@ stat -c '%y %s' "$S"      # 记下 mtime 与大小
 - [ ] 10.15 `[B]` 目录加载失败且路由已知 → 标签显示原始 id + 错误点，菜单里有「重试加载」
 - [ ] 10.16 `[B]` 窄窗口下菜单不被 composer 卡片裁剪；卡片内容长时列表内部滚动、footer 开关常驻
 - [ ] 10.17 `[B]` 模型很多（≥10 个）的提供方 → 菜单只显示约 5 行，首行与底部开关都在视口内，鼠标滚轮/触控板能滚到其余模型；换到模型少的提供方后菜单高度随之收缩
+- [ ] 10.18 `[B]` 点根层第三行「推理档」→ 顶部「‹ 返回」；下面按目录顺序列出该模型广告的推理档（档名 + 目录里的说明），当前生效档打勾；点选某档 → 菜单关闭，提交 `provider + model + reasoningEffort`，tooltip 里的推理档随之改变
+- [ ] 10.19 `[B]` 模型未声明默认档（目录里没有 `defaultEffort`）→ 推理档层首项是「提供方默认」；选中它 → 提交**不带** `reasoningEffort` 的完整组合（等价于让 host 用该模型自己的默认档），tooltip 的推理档回到模型默认
+- [ ] 10.20 `[B]` 当前模型不支持推理档（目录里没有 `reasoning`）→ 根层第三行显示「不支持」，进入后只有一行灰色说明、没有可选项；英文客户端显示 `Unsupported` / `no reasoning tiers`
+- [ ] 10.21 `[B]` 模型目录未就绪或模型条目未知 → 根层第三行显示「未知」，与 provider/模型行的既有降级一致，不出现报错
 
 ## 9. 回滚
 
@@ -125,6 +129,7 @@ stat -c '%y %s' "$S"      # 记下 mtime 与大小
 
 - v1（已归档）：`openspec/changes/archive/2026-09-09-add-composer-provider-label/`，能力规格见 `openspec/specs/composer-provider-label/spec.md`。
 - 本轮扩展：`openspec/changes/archive/2026-09-09-extend-composer-provider-picker/specs/composer-provider-label/spec.md`（3 条 MODIFIED + 1 条 REMOVED + 5 条 ADDED）。
+- 二级 → 三级（2026-10-14，推理档行）：菜单结构相关 requirement 已就地同步到 `openspec/specs/composer-provider-label/spec.md`（根层三行 + 推理档层 scenario），本轮新增 6 条断言（共 61 条），验收条目 10.1 与 10.18–10.21。
 
 逐条走查完成后：
 

@@ -1,6 +1,6 @@
 # dsh-composer-provider-label
 
-在 DSH Web GUI 的 composer（输入框）里，模型选择器左边加一枚 **provider 标签**：把「下一次请求实际会打到哪个提供方」直接说清楚，让同一模型名下的多条路由可以区分；点开它就是一个**提供方 / 模型两级选择菜单**。
+在 DSH Web GUI 的 composer（输入框）里，模型选择器左边加一枚 **provider 标签**：把「下一次请求实际会打到哪个提供方」直接说清楚，让同一模型名下的多条路由可以区分；点开它就是一个**提供方 / 模型 / 推理档三级选择菜单**。
 
 例如同一台机器上 `deepseek-v4-flash` 同时挂在 ark、codemaker、bai、openroputer 四家时，输入区原本只显示 `DeepSeek-V4-Flash · high`，装了这个插件后读作：
 
@@ -48,14 +48,17 @@ composer 工具行右侧组、**模型选择器左边一格**：`[…] [provider
 
 | 层 | 内容 |
 | --- | --- |
-| 根层 | `提供方  <当前短名> ›` 与 `模型  <当前模型短名> ›` 两行 |
+| 根层 | `提供方  <当前短名> ›`、`模型  <当前模型短名> ›` 与 `推理档  <当前档名> ›` 三行 |
 | 提供方层 | 顶部「‹ 返回」；下面是目录广告的提供方（目录顺序），失败项置灰并带失败原因；当前路由的提供方若未被广告，会置顶合成一行并标「当前路由」 |
 | 模型层 | 顶部「‹ 返回」；「全部提供方」时按 provider 分组（组标题 = 别名 + 登记名）；「仅当前提供方」时只列当前提供方、无组标题 |
+| 推理档层 | 顶部「‹ 返回」；按目录顺序列出该模型广告的推理档（档名 + 目录里的说明），当前档打勾；模型未声明默认档时首项是「提供方默认」 |
 | 底部 footer | 常驻两个互斥开关：`全部提供方` / `仅当前提供方`（当前项打勾） |
 
 - **点提供方 = 立即切换**：若当前模型仍属于该提供方就保留它；否则优先用 profile 默认模型（当它属于该提供方），再否则用该提供方的第一个模型。提交的永远是「提供方 + 模型」完整组合（宿主的状态模型里没有「只选提供方」这回事）。
 - 切换后菜单自动进入模型层，方便接着换模型；选完模型菜单关闭。
 - 当前推理档（effort）在新模型仍支持时保留，否则省略（落到该 provider 的默认档）。
+- 根层第三行「推理档」显示当前生效档（模型自己的 `defaultEffort` 或本会话显式选的档）；模型不支持推理档时显示「不支持」，进入后只有一行说明。
+- 推理档层选中某档即提交 `provider + model + reasoningEffort`；选「提供方默认」提交**不带** `reasoningEffort` 的完整组合（等价于让 host 用该模型的默认档）。
 - 菜单内不显示我们自己的「路由来源」，它只在 tooltip 里（悬停/聚焦标签）。
 - 键盘：Tab 在项间移动、Enter 触发、Esc 关闭；不提供方向键。
 - 显示范围偏好存在浏览器 localStorage（键 `dsh.composer-provider-label.v1`，默认「全部提供方」），**不写宿主配置**。
@@ -139,12 +142,12 @@ tooltip 文案跟随客户端语言（zh/en）；标签文本是 provider 名字
 ## 开发
 
 ```bash
-node sub-plugins/dsh-composer-provider-label/test/bundle.test.mjs   # 55 条逻辑断言 + 能力审计
+node sub-plugins/dsh-composer-provider-label/test/bundle.test.mjs   # 61 条逻辑断言 + 能力审计
 node --check sub-plugins/dsh-composer-provider-label/src/index.js
 node --check sub-plugins/dsh-composer-provider-label/src/client.js
 ```
 
-55 条断言覆盖：bundle 注册协议、槽位 id/order、locale 字典、四条路由场景（显式 / 沿用 / 默认 / 无路由）、括号剪裁、office 内置别名、settings 别名覆盖与三种失败回退、三个刷新信号、zh/en、纯函数单测、client 与 node 内置表一致性、node 半空安全；以及本轮扩展：菜单开关与零副作用、根层/提供方层/模型层内容与顺序、失败项置灰、未广告的当前提供方合成行、四种选模型规则（保留 / 默认优先 / 第一个 / effort 继承）、选完自动进入模型层、显示范围切换与 localStorage 持久化、空态与一键切回、写入参数形状、忙碌态、拒绝写入的错误态、子代理会话禁用、目录失败的重试入口、缺 `Menu` 时的只读降级，以及**能力审计**（`selectModel` 只允许一个调用点，其余改状态 Remote 与 settings 写入一律禁止）。GUI 侧的视觉/布局/主题/真实安装见 [ACCEPTANCE.md](./ACCEPTANCE.md)。
+61 条断言覆盖：bundle 注册协议、槽位 id/order、locale 字典、四条路由场景（显式 / 沿用 / 默认 / 无路由）、括号剪裁、office 内置别名、settings 别名覆盖与三种失败回退、三个刷新信号、zh/en、纯函数单测、client 与 node 内置表一致性、node 半空安全；以及本轮扩展：菜单开关与零副作用、根层/提供方层/模型层内容与顺序、失败项置灰、未广告的当前提供方合成行、四种选模型规则（保留 / 默认优先 / 第一个 / effort 继承）、选完自动进入模型层、显示范围切换与 localStorage 持久化、空态与一键切回、写入参数形状、忙碌态、拒绝写入的错误态、子代理会话禁用、目录失败的重试入口、缺 `Menu` 时的只读降级、推理档行与推理档层（当前档打勾 / 选档写入 / 「提供方默认」省略字段 / 不支持模型的空态 / zh-en 文案 / `effortOptionsOf` 契约），以及**能力审计**（`selectModel` 只允许一个调用点，其余改状态 Remote 与 settings 写入一律禁止）。GUI 侧的视觉/布局/主题/真实安装见 [ACCEPTANCE.md](./ACCEPTANCE.md)。
 
 ## License
 

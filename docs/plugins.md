@@ -22,7 +22,7 @@ dsh plugin --profile web add <本机仓库根>                                  
 | [`dsh-plugin-manager`](../dsh-plugin-manager/README.md) | 管理本仓库全部子插件的唯一控制台 | 设置 → **本地插件** | 宿主 + 客户端 | 装它本身即可 |
 | [`dsh-composer-history-recall`](../sub-plugins/dsh-composer-history-recall/README.md) | 输入框里 `↑`/`↓` 逐条召回**本会话你发过的**消息 | composer 键盘 | 纯客户端 | 需 `conversation.input.overlay` 槽 + composer 根 `data-composer-input`；缺席则惰性不生效 |
 | [`dsh-esc-rewind`](../sub-plugins/dsh-esc-rewind/README.md) | `Esc` 停止、`Esc Esc` 回退本轮重来、`/rewind` 从任意历史轮重来；旧会话可归档或真删 | composer 键盘 + `/rewind` + 会话头图标 | 客户端 + **宿主半**（删除模式） | 删除模式需要 `webServer`；无则自动降级为归档 |
-| [`dsh-composer-provider-label`](../sub-plugins/dsh-composer-provider-label/README.md) | 在模型名左边显示**实际打到哪个 provider**，并给出提供方/模型两级选择菜单 | composer 右侧标签（点开即菜单） | 客户端 + 可选宿主设置段 | 核心 **≥ 0.1.2-rc.1**；无 `Menu` 原语时退化为只读标签 |
+| [`dsh-composer-provider-label`](../sub-plugins/dsh-composer-provider-label/README.md) | 在模型名左边显示**实际打到哪个 provider**，并给出提供方/模型/推理档三级选择菜单 | composer 右侧标签（点开即菜单） | 客户端 + 可选宿主设置段 | 核心 **≥ 0.1.2-rc.1**；无 `Menu` 原语时退化为只读标签 |
 | [`dsh-session-title-regenerate`](../sub-plugins/dsh-session-title-regenerate/README.md) | 用**当前模型**摘要本会话全部提问，重生成 ≤60 字标题；**思考开关 / 推理强度 / 输出上限**可在设置页调（默认关思考、512） | 会话头按钮 / 侧栏行 `⋯` 菜单 / `/regenerate-title` / 设置 →「本地插件」tab | 客户端 + 宿主命令 | 核心 ≥ 0.1.1-rc.2 |
 | [`dsh-session-time-bucket`](../sub-plugins/dsh-session-time-bucket/README.md) | 侧栏会话列表按**今天/昨天/前7天/前30天/更早**分组 | 自动：核心处于「单列表 + 最近更新」时接管观感 | 纯客户端 | 无需操作；切到按工作区/手动排序或搜索时自动退出 |
 | ~~[`dsh-open-session-workdir`](../sub-plugins/dsh-open-session-workdir/README.md)~~ **已退役** | ~~一键用**系统文件管理器**打开当前会话的工作目录~~ —— 核心已自带「Open In…」分体按钮（探测已装应用 + 记住上次选择） | 不再出现在管理器面板；源码保留在仓库 | — | 退役中：管理器扫描跳过它（`RETIRED_PLUGIN_DIRS`），无法再激活 |
@@ -61,10 +61,10 @@ dsh plugin --profile web add <本机仓库根>                                  
 - **诊断**：宿主 `GET /__esc-rewind/status`（settings 段是否注册成功 + 当前删除模式）、删除走 `POST /__esc-rewind/session/delete`；客户端 `window.__dsew`（门控计数，不含消息内容）。
 - **改宿主半（`src/index.js`）需重启 GUI host**，改 `src/client.js` 刷新页面即可。
 
-### dsh-composer-provider-label — provider 标签与两级选择
+### dsh-composer-provider-label — provider 标签与三级选择
 
 - **在哪**：composer 工具行右侧组、**模型选择器左边一格**：`[…] [provider] [DeepSeek-V4-Flash · high] [上下文] [发送]`。
-- **怎么用**：点标签弹出菜单 → 根层有「提供方」「模型」两行 → 点提供方**立即切换**（当前模型仍属于它就保留，否则优先 profile 默认模型、再否则该方第一个模型），随后自动进入模型层方便接着选；底部常驻「全部提供方 / 仅当前提供方」互斥开关。键盘 Tab/Enter/Esc。
+- **怎么用**：点标签弹出菜单 → 根层三行「提供方 / 模型 / 推理档」 → 点提供方**立即切换**（当前模型仍属于它就保留，否则优先 profile 默认模型、再否则该方第一个模型），随后自动进入模型层方便接着选；第三行「推理档」进入后列出该模型广告的档位（当前档打勾），选中即提交 `provider + model + reasoningEffort`，模型未声明 `defaultEffort` 时首项是「提供方默认」（提交时不带该字段），模型不支持推理档时该行显示「不支持」；底部常驻「全部提供方 / 仅当前提供方」互斥开关。键盘 Tab/Enter/Esc。
 - **只读信息**：悬停/聚焦标签 → tooltip 给出 provider 完整名 · 模型 id · 当前推理档 · **路由来源**（本会话显式选择 / 跟随 profile 默认）。
 - **短名从哪来**：settings 别名 > 内置表（只预置 `deepseek-official → office`）> 注册显示名剪掉尾部括号 > provider id。
   ```yaml

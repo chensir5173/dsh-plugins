@@ -30,7 +30,7 @@ dsh plugin --profile web add D:/ChenSirDocument/Dsh-Projects/dsh-plugins
 | [`dsh-plugin-manager`](dsh-plugin-manager/README.md) | 管理本仓库全部子插件（先装这一个） | 设置 → 本地插件 |
 | [`dsh-composer-history-recall`](sub-plugins/dsh-composer-history-recall/README.md) | 逐条召回本会话你发过的消息填回草稿（绝不自动发送） | 草稿首行按 `↑` / `↓` |
 | [`dsh-esc-rewind`](sub-plugins/dsh-esc-rewind/README.md) | 停止本轮 / 回退到任意一轮重来 | `Esc`、`Esc Esc`、`/rewind`、会话头图标 |
-| [`dsh-composer-provider-label`](sub-plugins/dsh-composer-provider-label/README.md) | 显示并切换实际打到的提供方与模型 | 输入框右侧模型标签 |
+| [`dsh-composer-provider-label`](sub-plugins/dsh-composer-provider-label/README.md) | 显示并切换实际打到的提供方、模型与推理档 | 输入框右侧模型标签 |
 | [`dsh-session-title-regenerate`](sub-plugins/dsh-session-title-regenerate/README.md) | 重新生成会话标题 | 会话头按钮 / 侧栏 `⋯` / `/regenerate-title` |
 | [`dsh-session-time-bucket`](sub-plugins/dsh-session-time-bucket/README.md) | 侧栏会话按时间分组 | 自动（无按钮） |
 | [`dsh-idle-hook`](sub-plugins/dsh-idle-hook/README.md) | 模型不在运行时（一轮结束 / 等待批准 / 等待回答）执行你配置的本机脚本，把通知送到手机或桌面（**页面关着也生效**） | 设置 → 空闲通知 |

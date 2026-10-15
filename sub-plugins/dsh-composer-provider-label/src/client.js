@@ -252,6 +252,11 @@ window.__ModuleLoader__.load({
       'menu.showAll': '切回全部提供方',
       'menu.unavailable': '该会话不允许切换模型',
       'menu.noModel': '未选择',
+      'menu.effort': '推理档',
+      'menu.effortNone': '不支持',
+      'menu.effortUnknown': '未知',
+      'menu.effortDefault': '提供方默认',
+      'menu.effortEmpty': '该模型不支持推理档',
       'error.catalog': '模型目录加载失败',
       'error.write': '切换失败',
     }
@@ -280,6 +285,11 @@ window.__ModuleLoader__.load({
       'menu.showAll': 'Show all providers',
       'menu.unavailable': 'This session cannot switch models',
       'menu.noModel': 'Not selected',
+      'menu.effort': 'Effort',
+      'menu.effortNone': 'Unsupported',
+      'menu.effortUnknown': 'Unknown',
+      'menu.effortDefault': 'Provider default',
+      'menu.effortEmpty': 'This model offers no reasoning tiers',
       'error.catalog': 'Failed to load the model catalog',
       'error.write': 'Switch failed',
     }
@@ -627,6 +637,39 @@ window.__ModuleLoader__.load({
       if (route && route.reasoningEffort) return route.reasoningEffort
       if (model && model.reasoning && model.reasoning.defaultEffort) return model.reasoning.defaultEffort
       return undefined
+    }
+
+    /**
+     * The reasoning tiers one catalog model advertises, in catalog order.
+     * A model without `reasoning` advertises none (empty array). When the
+     * model declares no `defaultEffort` the provider picks, so an explicit
+     * "provider default" option (empty id) leads the list; a declared default
+     * missing from `efforts` is appended so the live route always has a row.
+     */
+    function effortOptionsOf(model) {
+      const reasoning = model && model.reasoning
+      if (!reasoning || typeof reasoning !== 'object') return []
+      const levels = Array.isArray(reasoning.efforts)
+        ? reasoning.efforts.filter((level) => level && typeof level.id === 'string' && level.id)
+        : []
+      const declared = typeof reasoning.defaultEffort === 'string' && reasoning.defaultEffort
+        ? reasoning.defaultEffort
+        : ''
+      if (levels.length === 0 && !declared) return []
+      const options = []
+      if (!declared) options.push({ id: '', name: '', detail: '', providerDefault: true })
+      for (const level of levels) {
+        options.push({
+          id: level.id,
+          name: typeof level.name === 'string' && level.name ? level.name : level.id,
+          detail: typeof level.description === 'string' ? level.description : '',
+          providerDefault: false,
+        })
+      }
+      if (declared && !levels.some((level) => level.id === declared)) {
+        options.push({ id: declared, name: declared, detail: '', providerDefault: false })
+      }
+      return options
     }
 
     /**
@@ -1038,6 +1081,16 @@ window.__ModuleLoader__.load({
       const modelShort = modelId ? modelShortNameOf(modelEntry, modelId) : ''
       const effort = effectiveEffortOf(route, modelEntry)
       const effortLabel = effortLabelOf(modelEntry, effort)
+      const effortOptions = effortOptionsOf(modelEntry)
+      // '' stands for "provider default": a route that pins no tier itself.
+      const effortCurrentId = effort === undefined ? '' : effort
+      const effortValue = !modelEntry
+        ? __t('menu.effortUnknown')
+        : effortOptions.length === 0
+          ? __t('menu.effortNone')
+          : effortCurrentId === ''
+            ? __t('menu.effortDefault')
+            : effortLabel || effort
 
       __diag.lastProvider = providerId
       __diag.lastShort = shortName
@@ -1113,6 +1166,7 @@ window.__ModuleLoader__.load({
         if (catalogFailed || (catalog && Array.isArray(catalog.failures) && catalog.failures.length > 0)) retryRow()
         pushItem('provider', entryRow(__t('menu.provider'), shortName), { action: () => setPane('provider') })
         pushItem('model', entryRow(__t('menu.model'), modelShort || __t('menu.noModel')), { action: () => setPane('model') })
+        pushItem('effort', entryRow(__t('menu.effort'), effortValue), { action: () => setPane('effort') })
       }
 
       if (pane === 'provider') {
@@ -1175,6 +1229,34 @@ window.__ModuleLoader__.load({
               },
             })
           }
+        }
+      }
+
+      if (pane === 'effort') {
+        pushItem('back', '\u2039 ' + __t('menu.back'), { action: () => setPane('root') })
+        pushSeparator('sep:back')
+        if (effortOptions.length === 0) {
+          pushItem('effort:none', __t('menu.effortEmpty'), { disabled: true })
+        }
+        // One row per advertised tier; the empty id means "let the provider
+        // decide", which submits the route without the field at all.
+        for (const option of effortOptions) {
+          const optionId = 'effort:' + (option.id || 'default')
+          if (option.id === effortCurrentId) selectedIds.push(optionId)
+          pushItem(optionId, stackedRow(
+            option.providerDefault ? __t('menu.effortDefault') : option.name,
+            option.detail || undefined,
+          ), {
+            disabled: !writable || !modelId,
+            action: () => {
+              if (!writable || !modelId) return
+              void __selectRoute(session, sessionId, {
+                provider: providerId,
+                model: modelId,
+                ...(option.id ? { reasoningEffort: option.id } : {}),
+              }).then((ok) => { if (ok) close() })
+            },
+          })
         }
       }
 
@@ -1364,6 +1446,7 @@ window.__ModuleLoader__.load({
       modelShortNameOf,
       effortLabelOf,
       effectiveEffortOf,
+      effortOptionsOf,
       chooseSelection,
       providerRows,
       modelRows,
