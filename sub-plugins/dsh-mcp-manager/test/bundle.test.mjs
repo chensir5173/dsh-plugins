@@ -1097,7 +1097,7 @@ test('the dialog reads the data-envelope failure and the tools-unavailable note'
       return ok({
         mode: 'static',
         source: 'registry',
-        serverName: 'context7',
+        serverName: 'Context7 官方',
         tools: [],
         note: '静态清单按 mcp__<serverName>__ 前缀统计，工具名超长会被归一化，属估计值（当前读不到宿主工具清单：tools service missing）',
         reason: 'tools-unavailable',
@@ -1107,6 +1107,7 @@ test('the dialog reads the data-envelope failure and the tools-unavailable note'
   all().find((node) => node.props['data-tools-open'] === 'mcp-context7').props.onClick()
   await settle()
   assert.equal(withProp('data-tools-empty', 'true').length, 1)
+  assert.equal(cellOf('data-tools-title', 'mcp-context7'), '工具：Context7 官方', 'the host-reported serverName wins over the row label')
   assert.ok(treeText().indexOf('当前读不到宿主工具清单：tools service missing') !== -1, 'the host note must reach the bottom even when the list is empty')
   assert.equal(cellOf('data-tools-badge', 'static'), '本机已注册')
   withProp('data-tools-probe', 'mcp-context7')[0].props.onClick()

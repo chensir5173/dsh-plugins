@@ -895,7 +895,7 @@ window.__ModuleLoader__.load({
 
     function toolsOutcome(result, requested) {
       const wanted = requested === 'probe' ? 'probe' : 'static'
-      const fallback = { phase: 'error', mode: wanted, tools: [], latencyMs: null, note: '', error: null }
+      const fallback = { phase: 'error', mode: wanted, serverName: '', tools: [], latencyMs: null, note: '', error: null }
       if (!result || result.ok !== true) {
         const error = (result && result.error) || {}
         return Object.assign({}, fallback, {
@@ -939,6 +939,7 @@ window.__ModuleLoader__.load({
       return {
         phase: 'ready',
         mode: mode,
+        serverName: data.serverName === undefined || data.serverName === null ? '' : String(data.serverName),
         tools: tools,
         latencyMs: latencyOf(data, null),
         note: note,
@@ -2211,8 +2212,9 @@ window.__ModuleLoader__.load({
       const renderTools = () => {
         if (!toolsFor) return null
         const row = servers.filter((server) => server.id === toolsFor)[0] || null
-        const name = (row && (row.serverName || row.id)) || toolsFor
-        const state = toolsState || { phase: 'loading', mode: 'static', tools: [], latencyMs: null, note: '', error: null }
+        const state = toolsState || { phase: 'loading', mode: 'static', serverName: '', tools: [], latencyMs: null, note: '', error: null }
+        // 标题优先用宿主回报的 serverName（该条目可能不在本 profile 的列表里），其次用行上的名字。
+        const name = state.serverName || (row && (row.serverName || row.id)) || toolsFor
         const tools = Array.isArray(state.tools) ? state.tools : []
         const ready = state.phase === 'ready'
         const probeMode = state.mode === 'probe'

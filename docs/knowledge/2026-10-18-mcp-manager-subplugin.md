@@ -62,6 +62,7 @@ DSH 的 loader 按 **bundle 层 → profile 的 `cordis.patch.yml` → `$DSH_HOM
 - **静态状态与工具数（能力探测）**：`loader` 可用时按 `options.name === '@deepseek-ai/dsh-mcp-client'` 枚举（跳过 `options.group`，id 剥 `include:` 前缀），`options.disabled === true` → `disabled` 优先，否则探测 fiber 态映射为 `pending|loading|active|failed|unloaded|disabled`，**取不到一律 `null`（界面显示「—」），绝不猜**；`toolCountEstimate` = `tools.schemas()` 里 `mcp__<serverName>__` 前缀计数，`loader`/`tools` 任一不可用即 `null`。`list` 永不探测（不起进程、不联网）。
 - **YAML 兜底 = 与表单同一条写盘路径**：面板提交**整段 config 的 YAML**（无 `- insert:` 外壳、无标记）；宿主把它包成 `- insert:` 壳后交给 `host-core` 的 `parsePatch` 结构化解析 → 取 `config` → 与表单路径同一个 `validateMcpConfig` + 同一套块拼贴，测试断言两条路径产出的块**逐字相同**。非法 YAML（含 Tab 缩进 `E_TAB_INDENT`、只有注释的空体）→ HTTP 200 + `{ok:false,error:{code:'bad-yaml',fields}}`，**零写入、零备份**。
 - **工具列表（第 12 个端点 `tools`，2026-10-18 追加）**：面板每行「工具」按钮 → 对话框。默认**静态**：从 `ctx.tools.schemas()` 里挑公开名以 `mcp__<serverName>__` 开头的条目，返回 `{mode:'static', source:'registry', tools:[{name, description}], note, reason}` —— **不连接、不起进程**（`list` 与静态 `tools` 的 probeRunner 调用数在测试里断言为 0）。静态为空（该服务器未在本 profile 生效/未连上/没注册工具）→ `ok:true` + 空清单 + `note`（不是错误），面板给「真探测」按钮（`payload:{id, mode:'probe'}`），点了才真连一次 `tools/list`（复用 `probeTimeoutMs`，默认 8000）返回 `{mode:'probe', source:'probe', latencyMs, tools[]}`；失败 `probe-failed`（镜像 `error.latencyMs`）、找不到条目 `not-found`，都只在对话框内降级。静态清单**与「工具数估计」列同口径**：工具名超长被归一化（`<serverName>\0<rawName>` 的 sha256 前缀）后不再带 `mcp__` 前缀，会漏计，故属估计值。
+- **跨端口径坑（值得单独记）**：成功载荷的耗时在 `data.latencyMs`，而失败载荷的耗时在 **`error.latencyMs`**（宿主另镜像 `error.fields.latencyMs`）——面板最初只读 `data.latencyMs`，于是「真探测失败」这一态把延迟静默丢了。修法：面板统一走 `latencyOf(data, error)`（`src/client.js:885`，按 `data.latencyMs → data.latency → error.latencyMs → error.latency → error.fields.latencyMs` 依次取）；同理失败态的**模式徽标必须保持用户请求的那个**（点了真探测失败后仍显示「真探测」，不要退回「本机已注册」），标题也要优先用宿主回报的 `serverName`（条目可能不在本 profile 的列表里，行上取不到名字）。教训：跨端契约必须**两边都读对方源码逐行核对**，光对齐消息里的形状描述会漏掉信封差异。
 - **模型工具**：`mcp_manager_list` / `mcp_manager_set_enabled` / `mcp_manager_restart` / `mcp_manager_add`，仅当 `@deepseek-ai/dsh-tools` 可解析时注册（缺包跳过并写诊断，HTTP 与面板不受影响）。**工具列表没有第 5 个模型工具**（`tools` 只是 HTTP 动作）。
 - **与参考实现的差异（4 条）**：① 上游 `@js2hou/dsh-mcp-manager@0.1.5` 与旧项目 v3.0.0 都只认单个 profile（上游硬编码 `profiles/web`），本插件改成**矩阵 → 落点**；② 两者写盘都会整文件重新 dump（注释全丢），本插件行级块替换；③ 本插件额外有**全局默认参数**（`$DSH_HOME/.dsh-mcp-manager/state.json`）与**旧标记一次性迁移**；④ 旧项目 v3.0.0 的「工具预览」只有真连接一条路（`mcpm-tools` 走宿主已注册工具，按钮只在 `toolCount>0` 时出现），本插件改成**静态优先 + 空态才提示真探测**，且每行始终可见。
 
@@ -71,7 +72,7 @@ DSH 的 loader 按 **bundle 层 → profile 的 `cordis.patch.yml` → `$DSH_HOM
 |---|---|---|
 | 纯逻辑 | `node sub-plugins/dsh-mcp-manager/test/host-core.test.mjs` | tests 37 / pass 37 / fail 0 |
 | 宿主半 | `node sub-plugins/dsh-mcp-manager/test/host-http.test.mjs` | tests 31 / pass 31 / fail 0（含 `tools` 端点 6 条） |
-| 面板 | `node sub-plugins/dsh-mcp-manager/test/bundle.test.mjs` | 40/40 assertions passed（含工具对话框 6 条） |
+| 面板 | `node sub-plugins/dsh-mcp-manager/test/bundle.test.mjs` | 41/41 assertions passed（含工具对话框 7 条） |
 | 真实 `$DSH_HOME` 只读 | `node tmp/verify-mcp-manager.mjs` | pass 23 / fail 0（6 台解析、矩阵反推、迁移 5+1+1、与 MCP 无关行逐字不变、跨层冲突零写入） |
 | 仓库回归 | 管理器 7 支 + `sub-plugins/*/test/*.test.mjs` | 除 `dsh-idle-hook` 两支既有 `spawn EPERM`（沙箱禁起子进程）外全绿 |
 

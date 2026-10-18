@@ -68,7 +68,7 @@
 
 - [x] A10.1 `sub-plugins/dsh-mcp-manager/package.json` 不声明 `dsh.bundle`，目录内无 `cordis.patch.yml`（`bundle.test.mjs`）
 - [x] A10.2 `README.md` + `ACCEPTANCE.md` + `test/*.test.mjs` 齐备
-- [x] A10.3 根外壳 `package.json` 与 `dsh-plugin-manager/package.json` 的 `version` 一致且已 patch 递增（0.3.16 → 0.3.17 → `0.3.18 → 0.3.19`（§6 工具按钮）；`dsh-plugin-manager/test/root-install-shell.test.mjs` 的 "shell and inner package carry the SAME version" 通过）
+- [x] A10.3 根外壳 `package.json` 与 `dsh-plugin-manager/package.json` 的 `version` 一致且已 patch 递增（0.3.16 → 0.3.17 → `0.3.18 → 0.3.19`（§6 工具按钮）→ `0.3.19 → 0.3.20`（工具对话框失败态耗时/徽标修正）；`dsh-plugin-manager/test/root-install-shell.test.mjs` 的 "shell and inner package carry the SAME version" 通过）
 - [x] A10.4 `openspec validate add-mcp-manager-subplugin --strict` 通过
 - [x] A10.5 管理器 7 支测试与其它子插件测试无新增失败（见 E3：唯一失败是 `dsh-idle-hook` 两支既有 `spawn EPERM`）
 
@@ -78,7 +78,7 @@
 - [x] A11.2 静态清单只含公开名以 `mcp__<serverName>__` 开头的已注册工具（含 description，缺失归一为 `''`），**不连接、不起进程**（`host-http.test.mjs:867`；`list` 与静态 `tools` 的 probeRunner 调用数断言为 0）
 - [x] A11.3 静态为空 → `ok:true` + `tools:[]` + `note`（不是错误，`host-http.test.mjs:898`）；面板显示空态说明 + 「真探测」按钮并标注会启动一次 MCP 服务器子进程（`bundle.test.mjs:1027`）
 - [x] A11.4 「真探测」= `{id, mode:'probe'}`：宿主复用探测连接与 `probeTimeoutMs`（默认 8000）请求工具列表，返回 `{mode:'probe', source:'probe', latencyMs, tools[]}`（`host-http.test.mjs:932`、超时复用见 A7.2 追加断言）；面板显示延迟 ms 与「真探测」徽标
-- [x] A11.5 失败就地降级：`probe-failed`（含 `error.latencyMs` 镜像）与 `not-found` 只在对话框内显示错误码 + 重试，面板其它行不受影响（`host-http.test.mjs:959`、`bundle.test.mjs:1056`）
+- [x] A11.5 失败就地降级：`probe-failed` 与 `not-found` 只在对话框内显示错误码 + 重试，面板其它行不受影响；失败态的耗时从 **`error.latencyMs`**（宿主镜像，`error.fields.latencyMs` 也认）读取，不丢延迟；徽标保持用户请求的模式（真探测失败不回退成「本机已注册」）；标题优先用宿主回报的 `serverName`（条目可能不在本 profile 列表里）（`host-http.test.mjs:959`、`bundle.test.mjs:1056`/新用例 `the dialog reads the data-envelope failure and the tools-unavailable note`、`src/client.js:885 latencyOf`）
 - [x] A11.6 首屏仍只调一次 `list`：**无** `tools`、**无** `probe` 请求（`bundle.test.mjs:486`）；`list` 响应形状不变
 - [x] A11.7 `ctx.tools` 缺失或 `schemas()` 抛错 → 200 + 空清单 + `reason:'tools-unavailable'` + 诊断 `toolsLookup.registryAvailable=false`（`host-http.test.mjs:910`）
 - [x] A11.8 寻址 `id` 优先于 `serverName`（两者都可，都不匹配 → `not-found`）；兼容旧响应形状（无 `mode`/字符串项/缺 description）不泄漏 `undefined`（`host-http.test.mjs:973`、`bundle.test.mjs:1086`）
@@ -98,7 +98,7 @@
 |---|---|
 | `node sub-plugins/dsh-mcp-manager/test/host-core.test.mjs` | tests 37 / pass 37 / fail 0（62ms） |
 | `node sub-plugins/dsh-mcp-manager/test/host-http.test.mjs` | tests 31 / pass 31 / fail 0（1.24s）—— 含 §6.1 `tools` 端点 6 条新用例 |
-| `node sub-plugins/dsh-mcp-manager/test/bundle.test.mjs` | 40/40 assertions passed, exit 0 —— 含 §6.2 工具对话框 6 条新用例 |
+| `node sub-plugins/dsh-mcp-manager/test/bundle.test.mjs` | 41/41 assertions passed, exit 0 —— 含 §6.2 工具对话框 7 条新用例（含失败态读 `error.latencyMs` 与宿主 `serverName` 优先的跨端核对） |
 
 ### E2 真实 `$DSH_HOME` 只读验收（`node tmp/verify-mcp-manager.mjs`，pass=23 fail=0）
 
