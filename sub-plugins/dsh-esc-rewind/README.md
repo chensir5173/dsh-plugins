@@ -51,9 +51,9 @@ DSH 会话日志是 **append-only**：没有任何受支持的插件 API 能在�
 - **子代理守卫**：真删前用官方 `ctx.subagents.listChildren(sessionId)` 探一次本会话的子代理——子代理只能靠它**自己的 header** 挂父（`header.parentSession`），父日志一删就再也列不出来（界面入口只剩父会话的子代理目录），运行中的还会失去完成通知的收件人（`notifySettlement` 按父 agent 投递，父缺席即丢弃）。命中即 **409 + `{reason, children, running}`** 拒绝且不碰磁盘/记账；客户端据此**归档**并给专用 toast「该会话还有 N 个子代理（运行中 M），已改为归档（不删除）」。listing 抛错 → 同样拒绝（`reason: subagents-unknown`，fail-safe：证明不了“没有子代理”就不做不可逆操作）；`subagents` 服务缺席 → 放行（无运行时尚无法拥有子代理）。守卫结论留存 `HOST_DIAG.lastGuard` 并由 `GET /__esc-rewind/status` 回报。
 - **安全时序**：删除永远在“新分支 fork+open 成功并可用之后”；删除失败 → 降级 `archiveSession` + toast，回退本身不失败。
 
-## 子代理回收（设置 → 本地插件 → 子代理）
+## 子代理回收（宿主端点保留；**UI tab 自 2026-10-18 起休眠**）
 
-- **入口**：核心 `ui-settings-plugins` 独占唯一的「插件」设置导航行并渲染 tab chrome，本插件在它声明的 `settings.localPlugins.tab` 列表槽注册一个「子代理」tab（id `subagents`，order 50）。设置左侧导航**不再**为本插件新增行；核心没有该槽（旧版本）时注册被跳过，插件其它功能不受影响。
+- **UI 入口已撤掉（用户要求「暂时不用了，把 UI tab 先撤掉」）**：本插件**不再**往 `settings.localPlugins.tab` 注册「子代理」tab（id `subagents` / order 50 的常量与面板代码都还在），因此「设置 → 本地插件」里看不到这个 tab。**保留且可用的部分**：宿主半三个端点（`GET /__esc-rewind/orphans`、`POST /__esc-rewind/orphans/stop`、`POST /__esc-rewind/orphans/delete`）照旧注册、可直接 HTTP 调用；面板实现随意保留在 `__dsew._module.orphansPanel`，`fetchOrphans` / `stopOrphans` / `rescueOrphan` / `stopResultText` 也照旧导出。诊断：`__dsew.orphanTabDormant === true`、`orphanTabRegistered === false`（有意不注册，不是失败）。**恢复方式**：把 `src/client.js` 里那段注释掉的 `ctx.slots.inject(TAB_SLOT, () => ctx.slots.register({...}, OrphansPanel))` 注册块接回来（源码注释里已给出完整片段），改完刷新页面即可；不恢复时核心没有该槽的旧版本行为与现在完全一致（同样是「没有 entry、不算错误」）。
 - **孤儿 = 不可达的子代理会话**：`origin === 'subagent'` 且其 `parentSession` 已不存在，或父自身也不可达（传递判定）。依据：侧栏不渲染子代理行（`ui-workspace` 的 `tree.ts` 过滤 `origin !== 'subagent'`），子代理只能从父会话的子代理目录进入 ⇒ 父一被删，整棵子树都没有入口、完成通知也无处投递。
 - **只读统计**：`GET /__esc-rewind/orphans` 返回每个孤儿的 id、创建标签（子会话 `subagent/descriptor` 的 label，取不到回退 id）、父 id、是否在跑（`agents.get(id).status`）、能否找回（日志里有没有 `turn/end`）、最后活动时间；冷读并发上限 4，单条读取失败只降级该行。**打开面板与「刷新统计」只发 GET**，不停、不删、不 fork。
 - **停止**（`POST /__esc-rewind/orphans/stop`，body `{ids}`）：取消该孤儿的 agent 并等待静默（上限 15s）；未在跑 = 幂等 no-op；等待超时 = 如实回报「未确认静默」，不谎报成功。含义是**放弃它的结果**。
@@ -61,7 +61,7 @@ DSH 会话日志是 **append-only**：没有任何受支持的插件 API 能在�
 - **全选 / 取消全选**：一键勾选当前列表全部行，便于「停止选中 / 找回选中 / 删除选中 (N)」批量处置；计数显示「共 N 个 · 已选 M/N」。
 - **找回**：把孤儿 `fork` 成**普通会话**（`origin` 为空 ⇒ 侧栏可见、可继续追问），种子覆盖它到最后一个完整回合为止的全部对话，标题沿用孤儿标签并自动打开；**原孤儿不删除**。运行中的孤儿会**先停止再 fork**（未落盘的在跑内容进不了种子）；没有完整回合边界时按钮禁用并给出原因。
 - **全手动**：没有启动钩子、没有定时器、没有任何自动动作；**删除孤儿不在**本插件范围内（模型工具只提供 `list` / `stop`）。
-- **诊断**：`window.__dsew.orphans`（最近一次统计的 count/phase/error）、`__dsew.orphanActions`（最近 10 次动作）、`__dsew.orphanTabRegistered` / `orphanTabError`（入口注册结果）；宿主半 `GET /__esc-rewind/status` 带出 `orphans`（最近一次扫描结论）。
+- **诊断**：`window.__dsew.orphans`（最近一次统计的 count/phase/error）、`__dsew.orphanActions`（最近 10 次动作）、`__dsew.orphanTabDormant`（tab 休眠=有意不注册）/ `orphanTabRegistered` / `orphanTabError`；宿主半 `GET /__esc-rewind/status` 带出 `orphans`（最近一次扫描结论）。
 
 ## 键盘捕获与防误触
 
@@ -108,7 +108,7 @@ DSH 会话日志是 **append-only**：没有任何受支持的插件 API 能在�
 ## 开发 / 验证
 
 ```bash
-node sub-plugins/dsh-esc-rewind/test/bundle.test.mjs   # 逻辑 harness（89 条，含删除模式、子代理守卫、子代理回收（扫描/停止/找回/tab 注册）、提示时机、草稿附件双代桥接、命令描述契约、未落定输入三来源与还原时序用例）
+node sub-plugins/dsh-esc-rewind/test/bundle.test.mjs   # 逻辑 harness（96 条，含删除模式、子代理守卫、子代理回收（扫描/停止/找回/面板；tab 已休眠）、提示时机、草稿附件双代桥接、命令描述契约、未落定输入三来源与还原时序用例）
 node --check sub-plugins/dsh-esc-rewind/src/client.js
 node --check sub-plugins/dsh-esc-rewind/src/index.js
 ```

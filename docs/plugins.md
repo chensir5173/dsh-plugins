@@ -79,6 +79,7 @@ dsh plugin --profile web add <本机仓库根>                                  
 - **回退前会先清「未落定的排队消息」**：宿主的 fork 用事件种子重建子会话，父会话里刚发出、还没落盘的排队输入会被一起复制过去（子会话会先执行它、用户新发的只能排队）。所以回退前会删排队项并**等到快照确认清空**；清不掉就**放弃本次回退**并提示「该会话还有没发出的消息在排队…」。诊断：`__dsew.pendingCleared` / `pendingBlocked` / `childPendingCleared`。
 - **跨核心世代的契约**（都用能力探测，不读版本号）：草稿附件族（0.1.5 起 `createDrafts`/`releaseDraftAttachment`/`addAttachments`，旧名回退）；命令描述（0.1.5 起 `description` 由字符串变函数，用 getter 在读取时定型，见 `__dsew.commandDescShape`）。
 - **诊断**：宿主 `GET /__esc-rewind/status`（settings 段是否注册成功 + 当前删除模式）、删除走 `POST /__esc-rewind/session/delete`；客户端 `window.__dsew`（门控计数，不含消息内容）。
+- **子代理回收入口已休眠（2026-10-18）**：不再往「本地插件」页注册「子代理」tab，界面上看不到；宿主半三个孤儿端点（`GET /__esc-rewind/orphans`、`POST /__esc-rewind/orphans/stop|delete`）、面板实现与诊断全部保留（HTTP 可直接调用、注册块接回来即恢复），诊断标记 `__dsew.orphanTabDormant === true`。详见 [README](../sub-plugins/dsh-esc-rewind/README.md)。
 - **改宿主半（`src/index.js`）需重启 GUI host**，改 `src/client.js` 刷新页面即可。
 
 ### dsh-composer-provider-label — provider 标签与三级选择
@@ -181,7 +182,7 @@ dsh plugin --profile web add <本机仓库根>                                  
 | composer 右侧组 `conversation.input.right` | `dsh-composer-provider-label`（10，紧邻核心模型选择器左侧） |
 | 会话头操作区 `conversation.session.header.actions` | `dsh-session-title-regenerate`（27）· `dsh-esc-rewind` 处置开关（28）；核心自身另有 日程(10)/任务(20)/删除(30)。~~`dsh-open-session-workdir`（25）~~ 已于 2026-09-18 退役 |
 | 设置页 `settings.section` | `dsh-plugin-manager`「本地插件」（16）——本仓**唯一**的一条导航行，其余插件不再各占一行 |
-| 「本地插件」页内的 tab `settings.localPlugins.tab` | `dsh-plugin-manager`（`plugins` 0）· `dsh-agent-preset-manager`「Agent 预设」（`agent-presets` 20）· `dsh-mcp-manager`「MCP 服务器」（`mcp-servers` 30）· `dsh-idle-hook`（`idle-hook` 40）· `dsh-esc-rewind`「子代理」（`subagents` 50） |
+| 「本地插件」页内的 tab `settings.localPlugins.tab` | `dsh-plugin-manager`（`plugins` 0）· `dsh-agent-preset-manager`「Agent 预设」（`agent-presets` 20）· `dsh-mcp-manager`「MCP 服务器」（`mcp-servers` 30）· `dsh-idle-hook`（`idle-hook` 40）；`dsh-esc-rewind` 的「子代理」（`subagents` 50）自 2026-10-18 **休眠**（不再注册，宿主端点保留） |
 | 斜杠命令 | `/rewind`（客户端 `commandUi` 贡献）· `/regenerate-title`（宿主命令） |
 | 侧栏会话行 `⋯` 菜单 | `dsh-session-title-regenerate`（DOM 注入，核心无插件槽） |
 | 侧栏会话列表 | `dsh-session-time-bucket`（就地注入组头 + `[工作区]` 前缀，非槽位） |

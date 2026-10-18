@@ -340,6 +340,7 @@ window.__ModuleLoader__.load({
       lastDelete: null,
       lastRewind: null,
       orphanTabRegistered: false,
+      orphanTabDormant: false,
       orphanTabError: null,
       orphans: null,
       orphanActions: [],
@@ -2592,32 +2593,23 @@ window.__ModuleLoader__.load({
         ...(__locale ? { locale: NS } : {}),
       }, DisposeToggle))
 
-      // Register the orphan-reclaim tab inside the core "Plugins" settings page:
-      // ui-settings-plugins owns the single Plugins nav entry and the tab chrome,
-      // feature plugins contribute pages (no extra Settings nav rows).
-      try {
-        ctx.slots.inject(TAB_SLOT, () => {
-          let disposer = null
-          try {
-            disposer = ctx.slots.register({
-              name: TAB_SLOT,
-              id: TAB_ID,
-              order: TAB_ORDER,
-              label: () => __t('orphans.tab'),
-              ...(__locale ? { locale: NS } : {}),
-            }, OrphansPanel)
-            __diag.orphanTabRegistered = true
-          } catch (error) {
-            __diag.orphanTabError = (error && error.message) ? error.message : String(error)
-          }
-          return () => {
-            __diag.orphanTabRegistered = false
-            if (typeof disposer === 'function') { try { disposer() } catch { /* already gone */ } }
-          }
-        })
-      } catch (error) {
-        __diag.orphanTabError = (error && error.message) ? error.message : String(error)
-      }
+      // 孤儿回收 tab 已休眠（2026-10-18，用户要求「暂时不用了，把 UI tab 先撤掉」）：
+      // 面板实现（OrphansPanel / fetchOrphans / stopOrphans / deleteOrphans / rescueOrphan）、
+      // 宿主半端点（/__esc-rewind/orphans | orphans/stop | orphans/delete）与全部中英文案都保留，
+      // 只是不再往 `settings.localPlugins.tab` 注册入口 ⇒ 界面上看不到这个 tab。
+      // 恢复方式：把下面这段注册块接回来即可（原实现见本文件 git 历史）：
+      //   ctx.slots.inject(TAB_SLOT, () => {
+      //     let disposer = null
+      //     try {
+      //       disposer = ctx.slots.register({ name: TAB_SLOT, id: TAB_ID, order: TAB_ORDER,
+      //         label: () => __t('orphans.tab'), ...(__locale ? { locale: NS } : {}) }, OrphansPanel)
+      //       __diag.orphanTabRegistered = true
+      //     } catch (error) { __diag.orphanTabError = String(error && error.message || error) }
+      //     return () => { __diag.orphanTabRegistered = false; if (typeof disposer === 'function') { try { disposer() } catch {} } }
+      //   })
+      // 诊断口径：`orphanTabDormant === true` = 有意不注册；`orphanTabError` 只在真出错时才有值。
+      __diag.orphanTabDormant = true
+      __diag.orphanTabRegistered = false
 
       // Delete-mode switch: resolve the client remote.settings controller
       // through the SAFE reader (each candidate guarded on its own, because a

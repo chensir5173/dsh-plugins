@@ -555,8 +555,10 @@ test('bundle registers under the package id and declares only slots', () => {
 test('apply registers one overlay entry and the /rewind contribution', () => {
   const services = makeServices()
   applyWith(services)
-  assert.equal(services.registered.length, 3, 'overlay bridge + header dispose toggle + orphan tab')
-  assert.equal(orphanTabEntry(services).options.name, 'settings.localPlugins.tab', 'tab lives on the local-plugins entry')
+  assert.equal(services.registered.length, 2, 'overlay bridge + header dispose toggle（孤儿 tab 已休眠，不再注册）')
+  assert.equal(orphanTabEntry(services), undefined, '休眠期不往本地插件 tab 槽注册')
+  assert.equal(window.__dsew.orphanTabDormant, true, '诊断标记「有意不注册」')
+  assert.equal(window.__dsew.orphanTabRegistered, false)
   const overlay = services.registered.find((r) => r.options.name === 'conversation.input.overlay')
   assert.ok(overlay, 'overlay bridge registered')
   assert.equal(overlay.options.id, 'esc-rewind')
@@ -1944,17 +1946,21 @@ function orphanTabEntry(services) {
 }
 
 /**
- * Render the orphan tab (effects run per render in the shim). Pass the same
+ * Render the orphan panel (effects run per render in the shim). Pass the same
  * \`state\` object to keep component state across calls; omit it for a fresh mount.
  */
 async function renderOrphans(services, state = {}, rounds = 8) {
   const entry = orphanTabEntry(services)
-  assert.ok(entry, 'orphan tab registered')
-  if (state.entry === undefined) { freshInstance(); state.entry = entry }
+  // 2026-10-18: the orphan TAB is dormant (nothing registers on
+  // settings.localPlugins.tab), so the component is reached through the
+  // bundle's exported internals. Panel logic itself is unchanged.
+  const component = entry ? entry.component : internals()._module.orphansPanel
+  assert.equal(typeof component, 'function', 'orphan panel reachable (dormant tab: via exported internals)')
+  if (state.entry === undefined) { freshInstance(); state.entry = component }
   let tree = null
   for (let i = 0; i < rounds; i += 1) {
     beginRender()
-    tree = entry.component({})
+    tree = state.entry({})
     await new Promise((resolve) => setTimeout(resolve, 0))
   }
   return tree
@@ -1965,20 +1971,24 @@ function buttonByText(tree, label) {
   return collectNodes(tree).find((node) => node.type === 'button' && treeText(node) === label)
 }
 
-test('orphan tab: 注册到「本地插件」入口的 tab 槽（id/order/惰性 label），无该槽时静默降级', async () => {
+test('orphan tab 休眠（2026-10-18）：不再注册 tab 槽，但面板与宿主端点全部保留、经导出可达', async () => {
   const services = makeServices()
   applyWith(services)
-  const entry = orphanTabEntry(services)
-  assert.ok(entry, '注册了 settings.localPlugins.tab')
-  assert.equal(entry.options.id, 'subagents')
-  assert.equal(entry.options.order, 50)
-  assert.equal(typeof entry.options.label, 'function', 'label 惰性求值（核心按语言重取）')
-  assert.equal(window.__dsew.orphanTabRegistered, true)
+  assert.equal(orphanTabEntry(services), undefined, '不再往 settings.localPlugins.tab 注册（界面上没有该 tab）')
+  assert.equal(window.__dsew.orphanTabRegistered, false)
+  assert.equal(window.__dsew.orphanTabDormant, true, '诊断区分「有意不注册」与「注册失败」')
+  assert.equal(window.__dsew.orphanTabError, null, '休眠不是错误')
+  const mod = internals()._module
+  assert.equal(typeof mod.orphansPanel, 'function', '面板实现仍导出（可测试、可一键恢复注册）')
+  for (const fn of ['fetchOrphans', 'stopOrphans', 'rescueOrphan', 'stopResultText']) {
+    assert.equal(typeof mod[fn], 'function', fn + ' 仍导出（宿主端点未变）')
+  }
+  // 旧核心（连槽都没有）与休眠期行为一致：都是「没有 entry」，且都不算错误。
   const legacy = makeServices({ slotsAvailable: ['conversation.input.overlay', 'conversation.session.header.actions'] })
   applyWith(legacy)
-  assert.equal(orphanTabEntry(legacy), undefined, '旧核心没有该槽 ⇒ 不注册')
+  assert.equal(orphanTabEntry(legacy), undefined, '旧核心没有该槽 ⇒ 同样不注册')
   assert.equal(window.__dsew.orphanTabError, null, '槽不存在不算错误')
-  assert.equal(window.__dsew.orphanTabRegistered, false)
+  assert.equal(window.__dsew.orphanTabDormant, true)
 })
 
 test('orphan tab: 打开面板只读扫描（GET）并按行渲染事实', async () => {
@@ -2816,7 +2826,7 @@ test('regression: applying with a guard-shaped ctx binds settings and toggles', 
     },
   })
   factory(requireStub).apply(ctx)
-  assert.equal(registered.length, 3, 'overlay + header + orphan tab registered on a guard ctx')
+  assert.equal(registered.length, 2, 'overlay + header registered on a guard ctx（孤儿 tab 已休眠）')
   assert.equal(internals()._module.getSettings(), settingsService, 'settings controller bound through the guard shape')
   const env = mount({ services, sessionId: 's1', chat: chatOf([]) })
   toasts.length = 0
