@@ -237,6 +237,10 @@ window.__ModuleLoader__.load({
       muted: { color: 'var(--dsw-text-secondary,#8b8b8b)', fontSize: '12px' },
       mono: { fontFamily: 'ui-monospace,SFMono-Regular,Menlo,monospace', fontSize: '12px', wordBreak: 'break-all' },
       input: { width: '100%', padding: '6px 8px', borderRadius: '6px', border: '1px solid var(--dsw-border,rgba(127,127,127,.3))', background: 'transparent', color: 'inherit', font: 'inherit', boxSizing: 'border-box' },
+    // 原生 <select> 的下拉弹层用控件自身的 background/color 绘制：background 若为 transparent，
+    // 弹层退回浏览器默认白底，而 color: inherit 在暗色主题下是浅色文字 ⇒ 未选中的选项看起来像被禁用/看不清。
+    // 因此这里给不透明底色 + 显式前景色（对齐核心 ConfigField.module.css 的 <select> 写法）。
+    select: { width: '100%', padding: '6px 8px', borderRadius: '6px', border: '1px solid var(--dsw-alias-border-l4,rgba(127,127,127,.3))', background: 'var(--dsw-alias-bg-layer-3,Canvas)', color: 'var(--dsw-alias-label-primary,CanvasText)', font: 'inherit', boxSizing: 'border-box' },
       btn: { padding: '4px 10px', borderRadius: '6px', border: '1px solid var(--dsw-border,rgba(127,127,127,.3))', background: 'transparent', color: 'inherit', cursor: 'pointer', font: 'inherit' },
       btnPrimary: { padding: '5px 12px', borderRadius: '6px', border: '1px solid var(--dsw-accent,#4c8bf5)', background: 'var(--dsw-accent,#4c8bf5)', color: '#fff', cursor: 'pointer', font: 'inherit' },
       chip: { padding: '1px 7px', borderRadius: '999px', border: '1px solid var(--dsw-border,rgba(127,127,127,.3))', fontSize: '11px' },
@@ -1037,7 +1041,7 @@ window.__ModuleLoader__.load({
             React.createElement('div', { style: S.field },
               React.createElement('label', { style: S.label }, t('precondition')),
               React.createElement('select', {
-                style: S.input,
+                style: S.select,
                 value: draft.precondition,
                 onChange: (e) => setDraft(Object.assign({}, draft, { precondition: e.target.value })),
               },

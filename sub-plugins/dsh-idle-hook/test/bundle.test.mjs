@@ -638,6 +638,26 @@ test('a rule whose command has a newline cannot be saved (and says why)', async 
   assert.match(textOf(tree), /不要写换行/, 'the user is told what to change')
 })
 
+test('the precondition select paints its own background so its options stay readable', async () => {
+  resetSettings()
+  const section = mountSection()
+  fresh()
+  section()
+  await settle()
+  let tree = await renderOnce(section)
+  buttonByText(tree, '编辑').props.onClick()
+  await settle(1)
+  tree = await renderOnce(section)
+  const selects = byType(tree, 'select')
+  assert.equal(selects.length, 1, 'the rule editor renders exactly one native select (the precondition)')
+  const style = selects[0].props.style
+  // 原生 <select> 的弹层用控件自身的 background/color 绘制：background: transparent 会让暗色主题下的
+  // 弹层退回白底 + 继承浅色文字，未选中的选项看起来像被禁用。必须给不透明底色与显式文字色。
+  assert.notEqual(style.background, 'transparent', 'the popup must not fall back to a transparent background')
+  assert.match(String(style.background), /--dsw-alias-bg-layer-3/, 'and uses the theme surface token')
+  assert.match(String(style.color), /--dsw-alias-label-primary/, 'with an explicit theme label color')
+})
+
 test('a failed test run shows the script error, not just the exit code', async () => {
   resetSettings()
   testRunOverride = {
