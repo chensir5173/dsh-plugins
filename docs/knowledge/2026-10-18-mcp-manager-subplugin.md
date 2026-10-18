@@ -1,6 +1,6 @@
 # dsh-mcp-manager：MCP 定义的「落点」为什么必须由矩阵决定（0.2.0-rc.2 实证）
 
-日期：2026-10-18 ｜ 关联变更：`openspec/changes/add-mcp-manager-subplugin/` ｜ 产物：`sub-plugins/dsh-mcp-manager/`
+日期：2026-10-18 ｜ 关联变更：`openspec/changes/archive/2026-10-18-add-mcp-manager-subplugin/`（已归档；主规格 `openspec/specs/mcp-manager/spec.md`） ｜ 产物：`sub-plugins/dsh-mcp-manager/`
 
 ## 一句话
 

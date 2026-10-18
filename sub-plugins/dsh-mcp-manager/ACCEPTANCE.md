@@ -1,6 +1,6 @@
 # ACCEPTANCE — dsh-mcp-manager
 
-对应变更：`openspec/changes/add-mcp-manager-subplugin/specs/mcp-manager/spec.md`。
+对应规格：`openspec/specs/mcp-manager/spec.md`（能力主规格；来源变更 `openspec/changes/archive/2026-10-18-add-mcp-manager-subplugin/specs/mcp-manager/spec.md`，2026-10-18 归档时同步）。
 全部验收项必须**离线**运行（临时 `DSH_HOME`、不起真实服务、不碰正在运行的 profile），证据只认本文件末尾列出的命令与输出。
 
 ## A1 落点由矩阵决定（spec: 定义落点）
@@ -68,8 +68,8 @@
 
 - [x] A10.1 `sub-plugins/dsh-mcp-manager/package.json` 不声明 `dsh.bundle`，目录内无 `cordis.patch.yml`（`bundle.test.mjs`）
 - [x] A10.2 `README.md` + `ACCEPTANCE.md` + `test/*.test.mjs` 齐备
-- [x] A10.3 根外壳 `package.json` 与 `dsh-plugin-manager/package.json` 的 `version` 一致且已 patch 递增（0.3.16 → 0.3.17 → `0.3.18 → 0.3.19`（§6 工具按钮）→ `0.3.19 → 0.3.20`（工具对话框失败态耗时/徽标修正）；`dsh-plugin-manager/test/root-install-shell.test.mjs` 的 "shell and inner package carry the SAME version" 通过）
-- [x] A10.4 `openspec validate add-mcp-manager-subplugin --strict` 通过
+- [x] A10.3 根外壳 `package.json` 与 `dsh-plugin-manager/package.json` 的 `version` 一致且已 patch 递增（0.3.16 → 0.3.17（首版）→ 0.3.18 → 0.3.19（§6 工具按钮）→ 0.3.19 → 0.3.20（工具对话框失败态耗时/徽标修正）→ 0.3.20 → 0.3.21（归档本变更并同步主规格）；`dsh-plugin-manager/test/root-install-shell.test.mjs` 的 "shell and inner package carry the SAME version" 通过）
+- [x] A10.4 归档前 `openspec validate add-mcp-manager-subplugin --strict` 通过；2026-10-18 已把 delta 同步进 `openspec/specs/mcp-manager/spec.md` 并归档到 `openspec/changes/archive/2026-10-18-add-mcp-manager-subplugin/`
 - [x] A10.5 管理器 7 支测试与其它子插件测试无新增失败（见 E3：唯一失败是 `dsh-idle-hook` 两支既有 `spawn EPERM`）
 
 ## A11 工具列表（spec: 单台服务器的工具列表，2026-10-18 追加）
@@ -120,7 +120,22 @@
 
 ### E4 OpenSpec
 
+归档前（2026-10-18）：
+
 ```
 $ openspec validate add-mcp-manager-subplugin --strict
 Change 'add-mcp-manager-subplugin' is valid
 ```
+
+归档后（同一天）：delta 已同步进 `openspec/specs/mcp-manager/spec.md`（10 条需求、含 §6「单台服务器的工具列表」），变更目录移到 `openspec/changes/archive/2026-10-18-add-mcp-manager-subplugin/`；`openspec list` 不再列出该变更。
+
+```
+$ openspec list
+Changes:
+  add-dsh-idle-hook                        47/52 tasks   16d ago
+  2026-09-18-add-remove-all                ✓ Complete    16d ago
+  2026-09-13-hindsight-model-autostart     19/21 tasks   2026/9/14
+  add-repo-root-install-entry              22/23 tasks   2026/9/10
+```
+
+（`tasks.md` 里 0.1–0.3 三条保持未勾选：它们是「在运行中的宿主里实测 loader 形状 / profileContext / 重启耗时」，本机未做实验，已改为等价的能力探测实现并在 README「已知行为」注明。）
