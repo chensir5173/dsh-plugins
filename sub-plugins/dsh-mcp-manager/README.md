@@ -28,6 +28,7 @@ DSH 的 loader 按 **bundle 层 → profile 自己的 `cordis.patch.yml` → `$D
 - **矩阵**：每台服务器 × 每个 profile 的复选；变更会按上表重排文件（跨 profile 写入前二次确认）。
 - **全局默认参数**：新建表单的默认值（`toolCallTimeoutMs`、`failOnStartupError`、`maxInstructionBytes`、`probeTimeoutMs`、`defaultTransport`）。它们**不写进 patch** —— 保存时会落成该条目 `config` 内的具体值。
 - **测试连接**（按需，会起子进程）：按 config 真起一次 MCP 客户端，默认 8 秒超时，返回延迟与工具数；任何结果都会关闭客户端。
+- **工具**（每行一个按钮 → 对话框）：默认走**静态清单** —— 取本宿主已注册工具里公开名以 `mcp__<serverName>__` 开头的条目，显示工具名 + 一句话描述，**不连接、不起进程**。静态清单为空时（该服务器未在本 profile 生效、尚未连接成功或没注册工具）对话框会说明原因并给出「真探测」按钮：点了才真连一次服务器请求工具列表（会启动一次 MCP 服务器子进程，沿用 8 秒超时与错误语义）。静态清单与「工具数估计」列同口径（工具名超长被归一化时会漏计，属估计值）；列表首屏**不做任何探测**。
 - **迁移**：把旧标记 `# dsh-mcp-manager:server:<id>` / `:disable:<id>` 改写成 `# dsh-mcp-manager:2:server:<id>`；把形态匹配（`insert` + `name: '@deepseek-ai/dsh-mcp-client'`）但没有标记的条目补上标记；把同层 disable 覆盖行收敛为该 insert 行自身的 `disabled: true`。幂等，执行前自动备份。
 
 ## 写盘安全

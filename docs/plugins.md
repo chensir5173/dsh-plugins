@@ -56,6 +56,7 @@ dsh plugin --profile web add <本机仓库根>                                  
 - **写盘安全**：只做**行级块替换**（绝不整文件重新序列化），原子写（同目录临时文件 + rename），写前备份 `<文件名>.bak-<yyyyMMdd-HHmmss>` 且只留最近 10 份，CRLF/LF 与末尾换行沿用；除目标行块外**逐字不变**（中文注释、`!!js` 表达式都不动）；同一文件的写操作串行化。
 - **一次性迁移**：把旧标记 `# dsh-mcp-manager:server:<id>` 升级为 `# dsh-mcp-manager:2:server:<id>`，给形态匹配但没标记的条目补标记，并把同层 `disable` 覆盖行收敛进 insert 行的 `disabled: true`。**先预览后执行**（面板报将改写/补齐/收敛/跳过各几条），执行前备份，幂等。
 - **测试连接**：只有点按钮才起一次 MCP 子进程 / HTTP 握手，默认 8s 超时（`probeTimeoutMs`），返回延迟与工具数；**列表加载永不探测**。
+- **工具按钮**（每行「工具」→ 对话框，`{action:'tools', payload:{id}}`）：默认走**静态清单** —— 从本宿主已注册工具里挑公开名以 `mcp__<serverName>__` 开头的条目，显示工具名 + 一句话描述（单行截断、可展开、名字可复制），**不连接、不起进程**；静态为空时对话框说明原因并给出「真探测」按钮（`payload:{id, mode:'probe'}`，真连一次 `tools/list`，复用 8s 超时，旁注会启动一次 MCP 服务器子进程）。静态清单与「工具数估计」列同口径（超长工具名被归一化时会漏，属估计值）。
 - **全局默认参数**：`$DSH_HOME/.dsh-mcp-manager/state.json`（`toolCallTimeoutMs` / `maxInstructionBytes` / `failOnStartupError` / `probeTimeoutMs` / 已知 profile 集合）。新增与编辑时作初值，保存时落成 config 内具体字段，不写「默认」语义的键。
 - **YAML 兜底**：编辑页的 YAML 子页填**整段 config 的 YAML**（不含 `- insert:` 外壳与标记）即可提交；宿主先结构化校验，通过后与表单走**同一条写盘路径**（两条路径产出的块逐字相同），非法 YAML 返回 `bad-yaml` + 逐字段原因且零写入。
 - **模型工具**（需 `@deepseek-ai/dsh-tools` 可解析，否则整体跳过并写诊断）：`mcp_manager_list` / `mcp_manager_set_enabled` / `mcp_manager_restart` / `mcp_manager_add`。

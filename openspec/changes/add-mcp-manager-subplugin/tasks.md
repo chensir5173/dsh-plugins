@@ -54,3 +54,14 @@
 - [x] 5.2 文档索引：`docs/plugins.md` 新增一览表行 + 「逐个怎么说怎么用」小节 + 槽位/端点分布两行；`docs/knowledge/2026-10-18-mcp-manager-subplugin.md` 新增并在 `docs/knowledge/README.md` 登记。
 - [x] 5.3 版本同步：仓库根 `package.json` 与 `dsh-plugin-manager/package.json` 同步 `0.3.16 → 0.3.17`（`test/root-install-shell.test.mjs` 守住）。
 - [x] 5.4 `openspec validate add-mcp-manager-subplugin --strict` 通过；**不归档**，报告并等用户确认归档。
+
+## 6. 「工具」按钮（静态优先 + 按需真探测，2026-10-18 追加）
+
+写权范围：宿主半 = `sub-plugins/dsh-mcp-manager/src/index.js` + `test/host-http.test.mjs`（worker: t2-host）；浏览器半 = `sub-plugins/dsh-mcp-manager/src/client.js` + `test/bundle.test.mjs`（worker: t3-client）。两人不得互写对方文件。
+
+- [ ] 6.1 宿主半：新增 `tools` 动作 `{action:'tools', payload:{ id? | serverName?, mode?: 'static' | 'probe' }}`
+  - 静态（默认）：取 `ctx.tools.schemas()` 中公开名以 `mcp__<serverName>__` 开头的条目 → `{ok:true, mode:'static', serverName, source:'registry', tools:[{name, description}]}`；**不连接、不起进程**，`list` 仍绝不探测（测试断言 probeRunner 调用数 0）。
+  - `mode:'probe'`：复用探测的连接与超时（默认 8s）并请求工具列表 → `{ok:true, mode:'probe', serverName, source:'probe', latencyMs, tools:[{name, description}]}`；失败/超时走既有错误码，就地降级不影响其它端点。
+  - 静态清单为估计值（工具名超长归一化后会漏），响应带 `note` 说明；`serverName` 与 `id` 均可寻址，两者都给时以 `id` 为准。
+- [ ] 6.2 浏览器半：每行「工具」按钮 → 对话框（标题含服务器名与数量；来源徽标「本机已注册 / 真探测」；名称 + 单行截断描述可展开；复制工具名；加载/空/错误三态；空态提供「真探测」按钮并标注会启动一次 MCP 服务器子进程）；zh/en 文案补齐；首屏仍只调一次 `list`。
+- [ ] 6.3 Lead 收尾：README / ACCEPTANCE / `docs/plugins.md` / 知识篇更新；版本 `0.3.18 → 0.3.19` 双处同步；跑全量测试 + 真实 `$DSH_HOME` 只读验收脚本；`openspec validate --strict`；**不归档**。

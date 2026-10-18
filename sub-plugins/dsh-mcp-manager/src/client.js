@@ -180,6 +180,25 @@ window.__ModuleLoader__.load({
       probeFailed: '测试失败',
       probeNoLatency: '—',
 
+      // 工具清单（每行「工具」按钮 → 对话框）
+      tools: '工具',
+      toolsTitle: '工具：{name}（{n} 个）',
+      toolsTitleEmpty: '工具：{name}',
+      toolsBadgeStatic: '本机已注册',
+      toolsBadgeProbe: '真探测',
+      toolsLoading: '正在读取工具清单…',
+      toolsProbeLoading: '正在真探测（会启动一次 MCP 服务器子进程）…',
+      toolsEmpty: '没有可显示的工具：该服务器可能未在本 profile 生效、尚未连接成功，或尚未注册任何工具。',
+      toolsProbe: '真探测',
+      toolsProbeHint: '「真探测」会启动一次 MCP 服务器子进程（按 probeTimeoutMs 限时，返回后关闭）。',
+      toolsStaticHint: '「本机已注册」取自核心工具注册表，是当前进程已注册的工具名，可能与服务器实际工具数不同。',
+      toolsRetry: '重试',
+      toolsClose: '关闭',
+      toolsCopy: '复制',
+      toolsCopied: '已复制',
+      toolsLatency: '延迟 {ms}ms',
+      toolsFailed: '工具清单读取失败',
+
       // 新增/编辑表单
       add: '新增服务器',
       addTitle: '新增 MCP 服务器',
@@ -367,6 +386,24 @@ window.__ModuleLoader__.load({
       probeFail: '✗ {error} ({ms}ms)',
       probeFailed: 'Probe failed',
       probeNoLatency: '—',
+
+      tools: 'Tools',
+      toolsTitle: 'Tools: {name} ({n})',
+      toolsTitleEmpty: 'Tools: {name}',
+      toolsBadgeStatic: 'registered locally',
+      toolsBadgeProbe: 'live probe',
+      toolsLoading: 'Loading the tool list…',
+      toolsProbeLoading: 'Probing live (this spawns one MCP server child process)…',
+      toolsEmpty: 'No tools to show: this server may not be effective in this profile, may not have connected yet, or registers no tools.',
+      toolsProbe: 'Live probe',
+      toolsProbeHint: '"Live probe" spawns one MCP server child process (bounded by probeTimeoutMs, closed afterwards).',
+      toolsStaticHint: '"registered locally" comes from the core tool registry: the tool names registered in this process, which may differ from the server\'s real tool count.',
+      toolsRetry: 'Retry',
+      toolsClose: 'Close',
+      toolsCopy: 'Copy',
+      toolsCopied: 'Copied',
+      toolsLatency: '{ms}ms',
+      toolsFailed: 'Could not load the tool list',
 
       add: 'Add server',
       addTitle: 'Add MCP server',
@@ -557,6 +594,15 @@ window.__ModuleLoader__.load({
       mono: { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: 12, wordBreak: 'break-all' },
       hidden: { display: 'none' },
       muted: { color: 'var(--dsw-alias-label-tertiary)', fontSize: 12 },
+      // 工具对话框：覆盖层 + 卡片；窄屏用 maxWidth/min 兜住，内容超高时对话框内滚动。
+      overlay: { position: 'fixed', inset: 0, zIndex: 1000, background: 'rgba(0, 0, 0, .38)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16, boxSizing: 'border-box' },
+      dialog: { boxSizing: 'border-box', width: 'min(680px, 94vw)', maxHeight: '80vh', overflow: 'auto', background: 'var(--dsw-alias-bg-layer-3)', border: '.5px solid var(--dsw-alias-border-l3)', borderRadius: 14, padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 10, boxShadow: '0 12px 32px rgba(0, 0, 0, .28)' },
+      dialogHead: { display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' },
+      toolRow: { display: 'flex', flexDirection: 'column', gap: 4, borderTop: '.5px solid var(--dsw-alias-border-l4)', paddingTop: 8 },
+      toolHead: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' },
+      toolName: { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: 12, fontWeight: 600, wordBreak: 'break-all' },
+      toolDesc: { fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)', cursor: 'pointer', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '100%' },
+      toolDescOpen: { whiteSpace: 'pre-wrap', overflow: 'visible' },
     }
 
     /** 合并样式对象（后者覆盖前者）。参数：base/extra/…。返回值：object。 */
@@ -820,6 +866,84 @@ window.__ModuleLoader__.load({
       const n = typeof value === 'number' ? value : Number(value)
       if (!Number.isFinite(n) || n <= 0) return __t('toolsDash')
       return __tf('toolsCount', { n: n })
+    }
+
+    /**
+     * 功能作用：把 `tools` 端点的响应折成对话框状态。兼容旧形状（无 mode/source 按静态处理）、
+     *           字符串数组、缺失 description（显示为空而不是 undefined）、失败载荷（error）。
+     * 参数：result -- callApi 的返回值 { ok, data?, error? }
+     * 返回值：{ phase:'ready'|'error', mode:'static'|'probe', tools:[{name,description}], latencyMs, note, error }
+     * 调用样例：const state = toolsOutcome(await callApi('tools', { id: 'mcp-x' }))
+     */
+    /**
+     * 功能作用：从成功或失败载荷里取延迟毫秒 —— 宿主的探测失败把 latencyMs 放在 error 上
+     *           （镜像在 error.fields.latencyMs），成功则放在 data 上，这里统一兜住。
+     * 参数：data -- 成功载荷或 data 信封；error -- 错误对象
+     * 返回值：number 或 null
+     * 调用样例：latencyOf(data, error)
+     */
+    function latencyOf(data, error) {
+      const bag = data && typeof data === 'object' ? data : {}
+      const err = error && typeof error === 'object' ? error : {}
+      const fields = err.fields && typeof err.fields === 'object' ? err.fields : {}
+      const candidates = [bag.latencyMs, bag.latency, err.latencyMs, err.latency, fields.latencyMs]
+      for (const value of candidates) {
+        if (typeof value === 'number' && isFinite(value)) return value
+      }
+      return null
+    }
+
+    function toolsOutcome(result, requested) {
+      const wanted = requested === 'probe' ? 'probe' : 'static'
+      const fallback = { phase: 'error', mode: wanted, tools: [], latencyMs: null, note: '', error: null }
+      if (!result || result.ok !== true) {
+        const error = (result && result.error) || {}
+        return Object.assign({}, fallback, {
+          latencyMs: latencyOf(result && result.data, error),
+          error: {
+            code: error.code === undefined || error.code === null ? 'host-unavailable' : String(error.code),
+            message: String(error.message === undefined || error.message === null ? __t('toolsFailed') : error.message),
+            fields: error.fields === undefined ? null : error.fields,
+          },
+        })
+      }
+      const data = result.data && typeof result.data === 'object' ? result.data : {}
+      const raw = Array.isArray(data.tools) ? data.tools : Array.isArray(data.items) ? data.items : []
+      const tools = []
+      for (const item of raw) {
+        if (typeof item === 'string') {
+          if (item) tools.push({ name: item, description: '' })
+          continue
+        }
+        const row = item && typeof item === 'object' ? item : {}
+        const name = row.name === undefined || row.name === null ? '' : String(row.name)
+        if (!name) continue
+        const description = row.description === undefined || row.description === null ? '' : String(row.description)
+        tools.push({ name: name, description: description })
+      }
+      const mode = data.mode === 'probe' || data.source === 'probe' || data.mode === 'live' ? 'probe' : wanted
+      const note = data.note === undefined || data.note === null ? '' : String(data.note)
+      if (data.ok === false) {
+        const error = data.error && typeof data.error === 'object' ? data.error : {}
+        return Object.assign({}, fallback, {
+          mode: wanted,
+          latencyMs: latencyOf(data, error),
+          note: note,
+          error: {
+            code: error.code === undefined || error.code === null ? 'probe-failed' : String(error.code),
+            message: String(error.message !== undefined && error.message !== null ? error.message : data.error !== undefined && data.error !== null && typeof data.error !== 'object' ? data.error : __t('toolsFailed')),
+            fields: error.fields === undefined ? null : error.fields,
+          },
+        })
+      }
+      return {
+        phase: 'ready',
+        mode: mode,
+        tools: tools,
+        latencyMs: latencyOf(data, null),
+        note: note,
+        error: null,
+      }
     }
 
     /** 布局漂移的说明行（boolean / 对象 / 数组都吃）。参数：drift。返回值：string[]。 */
@@ -1190,6 +1314,12 @@ window.__ModuleLoader__.load({
       const [migratePlan, setMigratePlan] = useState(null)
       const [probes, setProbes] = useState({})
       const [filesOpen, setFilesOpen] = useState(false)
+      // 工具对话框：toolsFor = 打开的服务器 id（null 表示关闭）；toolsState = toolsOutcome 的形状。
+      const [toolsFor, setToolsFor] = useState(null)
+      const [toolsState, setToolsState] = useState(null)
+      const [toolsExpanded, setToolsExpanded] = useState({})
+      const [copiedTool, setCopiedTool] = useState('')
+      const toolsReqRef = useRef('')
       const [filesInfo, setFilesInfo] = useState(null)
       const [filesFailure, setFilesFailure] = useState(null)
       const aliveRef = useRef(true)
@@ -1334,6 +1464,58 @@ window.__ModuleLoader__.load({
         }
         setProbes(Object.assign({}, probes, { [server.id]: outcome }))
         setBusy('')
+      }
+
+      /** 打开「工具」对话框：打开即按 id 请求静态清单（mode 缺省 = 静态，不探测）。 */
+      const onOpenTools = async (server) => {
+        toolsReqRef.current = server.id
+        setToolsFor(server.id)
+        setToolsState({ phase: 'loading', mode: 'static', tools: [], latencyMs: null, note: '', error: null })
+        setToolsExpanded({})
+        setCopiedTool('')
+        const result = await callApi('tools', { id: server.id })
+        if (!aliveRef.current) return
+        if (toolsReqRef.current !== server.id) return
+        setToolsState(toolsOutcome(result, 'static'))
+      }
+
+      /** 「真探测」：显式带 mode:'probe'（宿主会起一次 MCP 子进程）；失败也留在对话框里。 */
+      const onProbeTools = async () => {
+        const id = toolsFor
+        if (!id) return
+        toolsReqRef.current = id
+        setToolsState({ phase: 'loading', mode: 'probe', tools: [], latencyMs: null, note: '', error: null })
+        const result = await callApi('tools', { id: id, mode: 'probe' })
+        if (!aliveRef.current) return
+        if (toolsReqRef.current !== id) return
+        setToolsState(toolsOutcome(result, 'probe'))
+      }
+
+      /** 错误态的「重试」：按上次用的模式重发（静态失败就重发静态，探测失败就重发探测）。 */
+      const onRetryTools = () => {
+        if (!toolsFor) return
+        if (toolsState && toolsState.mode === 'probe') onProbeTools()
+        else onOpenTools({ id: toolsFor })
+      }
+
+      const onCloseTools = () => {
+        setToolsFor(null)
+        setToolsState(null)
+        setToolsExpanded({})
+        setCopiedTool('')
+      }
+
+      /** 复制工具名：优先 clipboard，缺 API 也不抛错（只做提示）。 */
+      const onCopyTool = (name) => {
+        try {
+          const nav = typeof navigator === 'undefined' ? null : navigator
+          if (nav && nav.clipboard && typeof nav.clipboard.writeText === 'function') nav.clipboard.writeText(name)
+        } catch { /* 剪贴板不可用：仍然给出「已复制」提示，不打断阅读 */ }
+        setCopiedTool(name)
+      }
+
+      const onToggleTool = (name) => {
+        setToolsExpanded(Object.assign({}, toolsExpanded, { [name]: !toolsExpanded[name] }))
       }
 
       /** 打开/刷新「写入位置」：单独调 patchInfo，端点缺失时退回 list 里的那份。 */
@@ -1785,6 +1967,12 @@ window.__ModuleLoader__.load({
             React.createElement('button', {
               type: 'button',
               style: S.button,
+              'data-tools-open': server.id,
+              onClick: () => onOpenTools(server),
+            }, __t('tools')),
+            React.createElement('button', {
+              type: 'button',
+              style: S.button,
               disabled: locked,
               onClick: () => (editing === server.id ? onCancelForm() : onEdit(server)),
             }, editing === server.id ? __t('collapse') : __t('edit')),
@@ -2016,6 +2204,109 @@ window.__ModuleLoader__.load({
         )
       }
 
+      /**
+       * 工具对话框：加载 / 结果 / 空态 / 错误四态就地显示；关闭、重试、真探测都只影响这个对话框。
+       * 打开即请求静态清单（mode 缺省），只有点「真探测」才带 mode:'probe'。
+       */
+      const renderTools = () => {
+        if (!toolsFor) return null
+        const row = servers.filter((server) => server.id === toolsFor)[0] || null
+        const name = (row && (row.serverName || row.id)) || toolsFor
+        const state = toolsState || { phase: 'loading', mode: 'static', tools: [], latencyMs: null, note: '', error: null }
+        const tools = Array.isArray(state.tools) ? state.tools : []
+        const ready = state.phase === 'ready'
+        const probeMode = state.mode === 'probe'
+        const title = ready && tools.length ? __tf('toolsTitle', { name: name, n: tools.length }) : __tf('toolsTitleEmpty', { name: name })
+        const note = state.note || (ready && !probeMode ? __t('toolsStaticHint') : '')
+        const latency = probeMode && typeof state.latencyMs === 'number' ? __tf('toolsLatency', { ms: state.latencyMs }) : null
+        const body = []
+        if (state.phase === 'loading') {
+          body.push(React.createElement('div', { style: S.muted, 'data-tools-loading': 'true' },
+            probeMode ? __t('toolsProbeLoading') : __t('toolsLoading')))
+        } else if (state.phase === 'error') {
+          const error = state.error || {}
+          const fields = error.fields && typeof error.fields === 'object' ? error.fields : {}
+          body.push(React.createElement('div', { style: merge(S.banner, S.bannerBad), 'data-tools-error': error.code || 'error' },
+            React.createElement('div', null, __t('toolsFailed') + '：' + String(error.message || '')),
+            error.code ? React.createElement('div', { style: S.muted }, __tf('hostUnavailableCode', { code: error.code })) : null,
+            Object.keys(fields).map((key) => React.createElement('div', { key: key, style: S.error }, key + '：' + String(fields[key]))),
+          ))
+        } else if (!tools.length) {
+          body.push(React.createElement('div', { style: S.muted, 'data-tools-empty': 'true' }, __t('toolsEmpty')))
+        } else {
+          for (const tool of tools) {
+            const expanded = Boolean(toolsExpanded[tool.name])
+            body.push(React.createElement('div', { style: S.toolRow, key: tool.name, 'data-tool': tool.name },
+              React.createElement('div', { style: S.toolHead },
+                React.createElement('span', { style: S.toolName }, tool.name),
+                React.createElement('button', {
+                  type: 'button',
+                  style: S.button,
+                  'data-tool-copy': tool.name,
+                  onClick: () => onCopyTool(tool.name),
+                }, copiedTool === tool.name ? __t('toolsCopied') : __t('toolsCopy')),
+              ),
+              tool.description
+                ? React.createElement('div', {
+                    style: merge(S.toolDesc, expanded ? S.toolDescOpen : null),
+                    'data-tool-desc': tool.name,
+                    'data-expanded': expanded ? 'true' : 'false',
+                    title: tool.description,
+                    onClick: () => onToggleTool(tool.name),
+                  }, tool.description)
+                : null,
+            ))
+          }
+        }
+        const actions = []
+        if (state.phase === 'error') {
+          actions.push(React.createElement('button', {
+            type: 'button',
+            style: S.button,
+            'data-tools-retry': 'true',
+            onClick: () => onRetryTools(),
+          }, __t('toolsRetry')))
+        }
+        if (state.phase !== 'loading') {
+          actions.push(React.createElement('button', {
+            type: 'button',
+            style: merge(S.button, S.buttonPrimary),
+            'data-tools-probe': toolsFor,
+            onClick: () => onProbeTools(),
+          }, __t('toolsProbe')))
+        }
+        return React.createElement('div', {
+          style: S.overlay,
+          'data-tools-dialog': toolsFor,
+          onClick: (event) => { if (event && event.target === event.currentTarget) onCloseTools() },
+        },
+          React.createElement('div', { style: S.dialog, role: 'dialog', 'aria-modal': 'true' },
+            React.createElement('div', { style: S.dialogHead },
+              React.createElement('span', { style: S.cardTitle, 'data-tools-title': toolsFor }, title),
+              React.createElement('span', {
+                style: merge(S.tag, probeMode ? S.tagOn : null),
+                'data-tools-badge': probeMode ? 'probe' : 'static',
+              }, probeMode ? __t('toolsBadgeProbe') : __t('toolsBadgeStatic')),
+              latency ? React.createElement('span', { style: S.muted, 'data-tools-latency': 'true' }, latency) : null,
+              React.createElement('span', { style: S.spacer }),
+              React.createElement('button', {
+                type: 'button',
+                style: S.button,
+                'data-tools-close': 'true',
+                onClick: () => onCloseTools(),
+              }, __t('toolsClose')),
+            ),
+            body,
+            note ? React.createElement('div', { style: S.muted, 'data-tools-note': 'true' }, note) : null,
+            React.createElement('div', { style: S.dialogHead },
+              React.createElement('span', { style: S.muted }, __t('toolsProbeHint')),
+              React.createElement('span', { style: S.spacer }),
+              actions,
+            ),
+          ),
+        )
+      }
+
       return React.createElement('div', { style: S.root, 'data-panel': 'dsh-mcp-manager' },
         React.createElement('div', { style: S.intro }, __t('intro')),
         React.createElement('div', { style: S.toolbar },
@@ -2061,6 +2352,7 @@ window.__ModuleLoader__.load({
         (draft && !editing ? renderDraftForm() : null),
         servers.map((server) => renderServer(server)),
         snapshot ? renderDiagnostics(snapshot.diagnostics) : null,
+        renderTools(),
       )
 
       /** 宿主诊断（成功路径也显示，便于排查「矩阵没生效」这类问题）。 */
@@ -2130,6 +2422,7 @@ window.__ModuleLoader__.load({
         layerText,
         staticStateText,
         toolsText,
+        toolsOutcome,
         driftLines,
         linesToMap,
         mapToLines,

@@ -689,6 +689,15 @@ test('A7.1/A7.2 probe：成功与失败形状、超时按 probeTimeoutMs、文�
   assert.ok(elapsed >= 100 && elapsed < 3000, `elapsed=${elapsed}`)
   assert.equal(read(env.homePatch), before)
 
+  // tools 的探测模式复用同一套超时（此处默认值已被 setDefaults 改成 150ms）
+  const t1 = Date.now()
+  const toolsTimedOut = await host.call('tools', { id: 'mcp-Serena', mode: 'probe' })
+  const elapsed2 = Date.now() - t1
+  assert.equal(toolsTimedOut.json.ok, false, toolsTimedOut.raw)
+  assert.equal(toolsTimedOut.json.error.code, 'probe-failed')
+  assert.match(String(toolsTimedOut.json.error.fields.error), /150ms/)
+  assert.ok(elapsed2 >= 100 && elapsed2 < 3000, `elapsed=${elapsed2}`)
+
   const unknown = await host.call('probe', { id: 'mcp-Nope' })
   assert.equal(unknown.json.ok, false)
   assert.equal(unknown.json.error.code, 'not-found')
@@ -851,6 +860,139 @@ test('D7⑤ 非法 yaml → bad-yaml（HTTP 200 业务错误）+ 零写入 + 无
   assert.equal(upd.json.error.code, 'bad-yaml')
   assert.equal(read(env.homePatch), before)
   assert.equal(backupCount(env.homePatch), 0)
+}))
+
+// ═══════════════ §6.1 第 12 个动作 tools（静态清单 / 探测清单） ═══════════════
+
+test('§6.1 tools 静态：只返回 mcp__<serverName>__ 前缀的已注册工具（含 description），绝不调 probeRunner', withTemp(async (env) => {
+  let probeCalls = 0
+  const tools = makeToolsStub({
+    schemas: [
+      { name: 'mcp__Serena__find_symbol', description: '查找符号' },
+      { name: 'mcp__Serena__read_file' },                       // 描述缺失 → ''
+      { name: 'mcp__CodeMap__get_structure', description: '结构' },
+      { name: 'mcp_manager_list', description: '本插件自己的工具' },
+    ],
+  })
+  const host = await setupHost({ env, tools, probeRunner: async () => { probeCalls += 1; return { ok: true, latencyMs: 1 } } })
+
+  const res = await host.call('tools', { id: 'mcp-Serena' })
+  assert.equal(res.json.ok, true, res.raw)
+  assert.equal(res.json.data.mode, 'static')
+  assert.equal(res.json.data.source, 'registry')
+  assert.equal(res.json.data.serverName, 'Serena')
+  assert.deepEqual(res.json.data.tools, [
+    { name: 'mcp__Serena__find_symbol', description: '查找符号' },
+    { name: 'mcp__Serena__read_file', description: '' },
+  ])
+  assert.match(res.json.data.note, /mcp__<serverName>__/)
+  assert.match(res.json.data.note, /估计值/)
+  assert.equal(res.json.data.reason, null)
+
+  // 静态路径 + list 都不许探测（子进程/连接数必须为 0）
+  await host.call('list')
+  await host.call('tools', { id: 'mcp-CodeMap' })
+  assert.equal(probeCalls, 0, `静态 tools/list 不得探测，实际 ${probeCalls} 次`)
+}))
+
+test('§6.1 tools 静态：无匹配前缀 → ok + 空清单 + note（不是错误）', withTemp(async (env) => {
+  const tools = makeToolsStub({ schemas: [{ name: 'mcp__Serena__x', description: 'x' }] })
+  const host = await setupHost({ env, tools })
+  const res = await host.call('tools', { id: 'mcp-rea-mcp' })
+  assert.equal(res.status, 200, res.raw)
+  assert.equal(res.json.ok, true, res.raw)
+  assert.deepEqual(res.json.data.tools, [])
+  assert.equal(res.json.data.mode, 'static')
+  assert.match(res.json.data.note, /前缀统计/)
+  assert.equal(res.json.data.reason, null)
+}))
+
+test('§6.1 tools 静态：tools 服务缺失 / schemas 抛错 → 空清单 + note 说明原因，端点不 500', withTemp(async (env) => {
+  // ① 服务缺失
+  const noTools = await setupHost({ env, tools: null })
+  const res = await noTools.call('tools', { id: 'mcp-Serena' })
+  assert.equal(res.status, 200, res.raw)
+  assert.equal(res.json.ok, true, res.raw)
+  assert.deepEqual(res.json.data.tools, [])
+  assert.equal(res.json.data.reason, 'tools-unavailable')
+  assert.match(res.json.data.note, /读不到宿主工具清单/)
+  assert.equal(HOST.__diag().toolsLookup.registryAvailable, false)
+
+  // ② schemas() 抛错
+  const throwing = { register: () => () => {}, schemas: () => { throw new Error('boom') } }
+  const broken = await setupHost({ env, tools: throwing })
+  const res2 = await broken.call('tools', { id: 'mcp-Serena' })
+  assert.equal(res2.status, 200, res2.raw)
+  assert.equal(res2.json.ok, true, res2.raw)
+  assert.deepEqual(res2.json.data.tools, [])
+  assert.equal(res2.json.data.reason, 'tools-unavailable')
+  assert.match(res2.json.data.note, /boom/)
+}))
+
+test('§6.1 tools 探测：走 probeRunner 取真实清单，形状正确', withTemp(async (env) => {
+  let probeCalls = 0
+  const host = await setupHost({
+    env,
+    probeRunner: async () => {
+      probeCalls += 1
+      return {
+        ok: true,
+        latencyMs: 33,
+        toolCount: 2,
+        tools: [{ name: 'mcp__Serena__a', description: 'A' }, { name: 'mcp__Serena__b' }],
+      }
+    },
+  })
+  const res = await host.call('tools', { id: 'mcp-Serena', mode: 'probe' })
+  assert.equal(res.json.ok, true, res.raw)
+  assert.equal(res.json.data.mode, 'probe')
+  assert.equal(res.json.data.source, 'probe')
+  assert.equal(res.json.data.serverName, 'Serena')
+  assert.equal(res.json.data.latencyMs, 33)
+  assert.deepEqual(res.json.data.tools, [
+    { name: 'mcp__Serena__a', description: 'A' },
+    { name: 'mcp__Serena__b', description: '' },
+  ])
+  assert.equal(probeCalls, 1)
+}))
+
+test('§6.1 tools 探测失败 → probe-failed + {latencyMs,error}，且不影响随后的 list', withTemp(async (env) => {
+  const host = await setupHost({ env, probeRunner: async () => { throw new Error('spawn node ENOENT') } })
+  const res = await host.call('tools', { id: 'mcp-Serena', mode: 'probe' })
+  assert.equal(res.status, 200, res.raw)
+  assert.equal(res.json.ok, false, res.raw)
+  assert.equal(res.json.error.code, 'probe-failed')
+  assert.equal(typeof res.json.error.fields.latencyMs, 'number')
+  assert.equal(typeof res.json.error.latencyMs, 'number', 'error.latencyMs 镜像供面板错误态显示耗时')
+  assert.match(String(res.json.error.fields.error), /ENOENT/)
+
+  const after = await host.call('list')
+  assert.equal(after.json.ok, true, after.raw)
+  assert.ok(mcpServers(after.json.data).length >= 6)
+}))
+
+test('§6.1 tools 定位：id 优先于 serverName、serverName 兜底、都不匹配 → not-found；扁平写法与大小写别名可用', withTemp(async (env) => {
+  const host = await setupHost({ env })
+
+  const byId = await host.call('tools', { id: 'mcp-Serena', serverName: 'CodeMap' })
+  assert.equal(byId.json.ok, true, byId.raw)
+  assert.equal(byId.json.data.serverName, 'Serena', 'id 优先')
+
+  const byName = await host.call('tools', { serverName: 'CodeMap' })
+  assert.equal(byName.json.ok, true, byName.raw)
+  assert.equal(byName.json.data.serverName, 'CodeMap')
+
+  for (const payload of [{ id: 'mcp-nope' }, { serverName: 'nope' }, {}]) {
+    const miss = await host.call('tools', payload)
+    assert.equal(miss.status, 200, miss.raw)
+    assert.equal(miss.json.ok, false, miss.raw)
+    assert.equal(miss.json.error.code, 'not-found', miss.raw)
+  }
+
+  // 扁平写法 + 大小写别名（既有别名规则）
+  const flat = await host.call('tools', undefined, { rawBody: JSON.stringify({ action: 'TOOLS', id: 'mcp-Serena' }) })
+  assert.equal(flat.json.ok, true, flat.raw)
+  assert.equal(flat.json.data.serverName, 'Serena')
 }))
 
 // ═══════════════════════════ A8 HTTP 门与工具 ═══════════════════════════

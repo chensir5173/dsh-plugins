@@ -58,8 +58,14 @@ const FALLBACK_DEFAULTS = Object.freeze({
 
 const ENDPOINT_NAMES = Object.freeze([
   'list', 'add', 'update', 'remove', 'setEnabled', 'setMatrix',
-  'getDefaults', 'setDefaults', 'probe', 'migrate', 'patchInfo',
+  'getDefaults', 'setDefaults', 'probe', 'migrate', 'patchInfo', 'tools',
 ])
+
+/**
+ * 静态工具清单的口径说明（与 list 的「工具数估计」列同源）：
+ * 公开工具名由核心按 `mcp__<serverName>__<tool>` 生成，超长会被归一化，因此只是估计值。
+ */
+const TOOLS_STATIC_NOTE = '静态清单按 `mcp__<serverName>__` 前缀统计，工具名超长会被归一化，属估计值'
 
 // ═══════════════════════ host-core（惰性、可缺、绝不冒泡） ═══════════════════════
 
@@ -110,6 +116,8 @@ const HOST_DIAG = {
   lastError: null,
   mergeSanitizedRows: 0,
   mergeFallback: null,
+  runtimeProbe: null,
+  toolsLookup: null,
   applyError: null,
   updatedAt: null,
 }
@@ -134,6 +142,8 @@ function freshDiag() {
   HOST_DIAG.lastError = null
   HOST_DIAG.mergeSanitizedRows = 0
   HOST_DIAG.mergeFallback = null
+  HOST_DIAG.runtimeProbe = null
+  HOST_DIAG.toolsLookup = null
   HOST_DIAG.applyError = null
 }
 
@@ -222,7 +232,10 @@ class ServiceError extends Error {
 }
 
 function fail(code, message, fields) {
-  return { ok: false, error: { code, message, fields: fields === undefined ? null : fields } }
+  const error = { code, message, fields: fields === undefined ? null : fields }
+  // 便利镜像：探测类失败把耗时也放在 error.latencyMs（面板在错误态要能显示耗时）。
+  if (fields && typeof fields === 'object' && typeof fields.latencyMs === 'number') error.latencyMs = fields.latencyMs
+  return { ok: false, error }
 }
 
 /** 读 ctx 上的服务：`ctx.get()` 在服务缺失时返回 null（不是 undefined），两种都要当「没有」。 */
@@ -873,11 +886,27 @@ async function buildProbeTransport(config) {
 }
 
 /**
+ * 功能作用：把 MCP SDK / 探测桩返回的工具数组归一成 `[{ name, description }]`。
+ *          形状对齐核心 `ToolSchema = { name, description, parameters }`（描述可缺失 → ''）。
+ * 参数：value（任意；数组或 `{ tools: [...] }`）。
+ * 返回值：新数组（非法项丢弃，绝不抛）。
+ */
+function normalizeToolList(value) {
+  const arr = Array.isArray(value) ? value : value && Array.isArray(value.tools) ? value.tools : []
+  const out = []
+  for (const item of arr) {
+    if (!item || typeof item.name !== 'string' || item.name === '') continue
+    out.push({ name: item.name, description: typeof item.description === 'string' ? item.description : '' })
+  }
+  return out
+}
+
+/**
  * 功能作用：真实路径的探测执行器 —— 按 config 起一次 MCP 客户端（stdio/http），**任何路径都关闭客户端**。
  *          客户端形状对齐 `@deepseek-ai/dsh-mcp-client` 的 connection.ts（Client + 能力协商 + listTools）。
  *          离线测试一律走 `__setProbeRunner` 的桩，因此这里不做网络/子进程实测。
  * 参数：config（mcp-client Config）、{ signal }。
- * 返回值：{ ok: true, toolCount? }；失败抛错（由 probeOnce 统一成 `{ ok:false, error }`）。
+ * 返回值：{ ok: true, toolCount?, tools? }；失败抛错（由 probeOnce 统一成 `{ ok:false, error }`）。
  */
 async function realProbeRunner(config, { signal } = {}) {
   const { transport, sdk } = await buildProbeTransport(config)
@@ -910,12 +939,16 @@ async function realProbeRunner(config, { signal } = {}) {
     }
     await client.connect(transport)
     let toolCount
+    let tools
     try {
       const res = await client.listTools()
       const arr = Array.isArray(res) ? res : res && Array.isArray(res.tools) ? res.tools : null
-      if (arr) toolCount = arr.length
+      if (arr) {
+        toolCount = arr.length
+        tools = normalizeToolList(arr)
+      }
     } catch { /* 工具数拿不到不算探测失败 */ }
-    return { ok: true, toolCount }
+    return { ok: true, toolCount, tools }
   } finally {
     await closeQuietly()
   }
@@ -923,10 +956,10 @@ async function realProbeRunner(config, { signal } = {}) {
 
 /**
  * 功能作用：跑一次探测，超时按 probeTimeoutMs（A7.2），任何路径都返回统一形状（A7.1）。
- * 参数：config、timeoutMs。
- * 返回值：{ ok, latencyMs, toolCount? | error? }。
+ * 参数：config、timeoutMs、opts（`{ wantTools: true }` 时额外带回 `tools` 清单）。
+ * 返回值：{ ok, latencyMs, toolCount? | error? }；wantTools 时多一个 `tools`。
  */
-async function probeOnce(config, timeoutMs) {
+async function probeOnce(config, timeoutMs, opts = {}) {
   const started = Date.now()
   const runner = SEAMS.probeRunner || ((cfg, opts) => realProbeRunner(cfg, opts))
   const controller = typeof AbortController === 'function' ? new AbortController() : null
@@ -947,6 +980,7 @@ async function probeOnce(config, timeoutMs) {
     if (res && res.ok === false) return { ok: false, latencyMs, error: errText(res.error || 'probe failed') }
     const out = { ok: true, latencyMs }
     if (res && typeof res.toolCount === 'number') out.toolCount = res.toolCount
+    if (opts.wantTools) out.tools = normalizeToolList(res && res.tools)
     return out
   } catch (err) {
     return { ok: false, latencyMs: Date.now() - started, error: errText(err) }
@@ -1199,32 +1233,41 @@ function createService(ctx) {
     return byId
   }
 
-  /** 已注册工具名快照（一次）；`tools.schemas()` 不可用返回 null。 */
-  function registeredToolNames() {
+  /**
+   * 已注册工具快照（一次）：`[{ name, description }]`。
+   * `tools` 服务缺失或 `schemas()` 抛错 → `{ ok:false, reason }`（调用方降级，不报错）。
+   */
+  function registeredTools() {
     const tools = safeGet(ctx, 'tools')
-    if (!tools || typeof tools.schemas !== 'function') return null
+    if (!tools || typeof tools.schemas !== 'function') {
+      return { ok: false, tools: [], reason: 'tools service is not available' }
+    }
     try {
       const schemas = tools.schemas()
-      if (!Array.isArray(schemas)) return null
-      return schemas.map((s) => (s && typeof s.name === 'string' ? s.name : '')).filter((n) => n !== '')
+      if (!Array.isArray(schemas)) return { ok: false, tools: [], reason: 'tools.schemas() did not return an array' }
+      return { ok: true, tools: normalizeToolList(schemas), reason: null }
     } catch (err) {
       HOST_DIAG.lastError = `tools.schemas: ${errText(err)}`
-      return null
+      return { ok: false, tools: [], reason: `tools.schemas() threw: ${errText(err)}` }
     }
   }
 
   /**
    * 功能作用：给 list 的 servers 补 `staticState` / `toolCountEstimate`（D7 静态层，能力探测）。
    *          **绝不抛**：loader/tools 缺失或抛错都退化成 null 字段，list 仍然 ok。
-   * 参数：servers（mergeServers 的结果）。
+   *          `tools.schemas()` 每次调用只取一次快照（不按服务器重复取）。
+   * 参数：servers（mergeServers 的结果）、toolSnapshot（可选，复用同一份工具快照）。
    * 返回值：新数组（每项多两个字段）。
    */
-  function enrichRuntime(servers) {
+  function enrichRuntime(servers, toolSnapshot) {
     let states = null
-    let toolNames = null
+    let snap = toolSnapshot || null
     try { states = loaderStates() } catch (err) { HOST_DIAG.lastError = `loaderStates: ${errText(err)}` }
-    try { toolNames = registeredToolNames() } catch (err) { HOST_DIAG.lastError = `toolNames: ${errText(err)}` }
-    HOST_DIAG.runtimeProbe = { loader: states !== null, tools: toolNames !== null }
+    if (!snap) {
+      try { snap = registeredTools() } catch (err) { HOST_DIAG.lastError = `registeredTools: ${errText(err)}` }
+    }
+    if (!snap) snap = { ok: false, tools: [], reason: 'tools snapshot unavailable' }
+    HOST_DIAG.runtimeProbe = { loader: states !== null, tools: snap.ok }
     return servers.map((s) => {
       let staticState = null
       if (states && s && typeof s.id === 'string') {
@@ -1233,9 +1276,9 @@ function createService(ctx) {
         }
       }
       let toolCountEstimate = null
-      if (toolNames && s && typeof s.serverName === 'string' && s.serverName !== '') {
+      if (snap.ok && s && typeof s.serverName === 'string' && s.serverName !== '') {
         const prefix = `mcp__${s.serverName}__`
-        toolCountEstimate = toolNames.filter((n) => n.startsWith(prefix)).length
+        toolCountEstimate = snap.tools.filter((t) => t.name.startsWith(prefix)).length
       }
       return { ...s, staticState, toolCountEstimate }
     })
@@ -1577,6 +1620,69 @@ function createService(ctx) {
       return { id: id || null, timeoutMs, ...result }
     },
 
+    /**
+     * 端点 tools（第 12 个动作）：给面板「工具」按钮供数。
+     * 静态（默认 mode）：只从宿主**已注册工具**里挑公开名以 `mcp__<serverName>__` 开头的条目，
+     *   **绝不连接、绝不起子进程**（list 与静态 tools 都不碰 probeRunner）；
+     *   `tools` 服务缺失/schemas 抛错 → 空清单 + note 说明原因（不报错，面板要能显示原因）。
+     * 探测（mode:'probe'）：复用 probe 的连接与超时，连接后取真实工具清单；失败走 `probe-failed`。
+     */
+    async tools(payload) {
+      const p = payload && typeof payload === 'object' ? payload : {}
+      const mode = firstString(p.mode) === 'probe' ? 'probe' : 'static'
+      const { sources, stateInfo } = await snapshot()
+      const merged = mergeOf(sources, stateInfo)
+      const id = firstString(p.id)
+      const wantedName = firstString(p.serverName)
+      let server = null
+      if (id) server = findServer(merged.servers, id)
+      else if (wantedName) server = merged.servers.find((s) => s && s.serverName === wantedName) || null
+      if (!server) {
+        const label = id || wantedName || '(空)'
+        throw new ServiceError('not-found', `未找到条目 ${label}`, id ? { id: '未找到' } : { serverName: '未找到' })
+      }
+      const serverName = typeof server.serverName === 'string' ? server.serverName : ''
+
+      if (mode === 'static') {
+        const snap = registeredTools()
+        const prefix = serverName ? `mcp__${serverName}__` : ''
+        const list = prefix ? snap.tools.filter((t) => t.name.startsWith(prefix)) : []
+        HOST_DIAG.toolsLookup = {
+          id: server.id,
+          serverName: serverName || null,
+          mode,
+          registryAvailable: snap.ok,
+          matched: list.length,
+          at: new Date().toISOString(),
+        }
+        const note = snap.ok ? TOOLS_STATIC_NOTE : `${TOOLS_STATIC_NOTE}（当前读不到宿主工具清单：${snap.reason}）`
+        return {
+          mode: 'static',
+          serverName,
+          source: 'registry',
+          tools: list,
+          note,
+          reason: snap.ok ? null : 'tools-unavailable',
+        }
+      }
+
+      const defaults = stateInfo.state.defaults
+      const timeoutMs = Number(defaults.probeTimeoutMs) > 0 ? Number(defaults.probeTimeoutMs) : FALLBACK_DEFAULTS.probeTimeoutMs
+      const config = server.config && typeof server.config === 'object' ? server.config : null
+      if (!config) {
+        throw new ServiceError('probe-failed', `条目 ${server.id} 没有可用的 config（mergeServers 需返回 config）`, {
+          latencyMs: 0,
+          error: 'config unavailable',
+        })
+      }
+      const result = await probeOnce(config, timeoutMs, { wantTools: true })
+      HOST_DIAG.lastProbe = { id: server.id, timeoutMs, ok: result.ok, at: new Date().toISOString(), mode: 'tools' }
+      if (!result.ok) {
+        throw new ServiceError('probe-failed', `探测失败：${result.error}`, { latencyMs: result.latencyMs, error: result.error })
+      }
+      return { mode: 'probe', serverName, source: 'probe', latencyMs: result.latencyMs, tools: result.tools || [] }
+    },
+
     async migrate(payload) {
       return withOpLock(async () => {
         const { anchor, sources } = await snapshot()
@@ -1712,6 +1818,13 @@ function normalizeAction(body) {
   const exact = ENDPOINT_NAMES.find((n) => n === raw)
   const action = exact || ENDPOINT_NAMES.find((n) => n.toLowerCase() === raw.toLowerCase()) || null
   const payload = body && typeof body.payload === 'object' && body.payload !== null ? body.payload : {}
+  // 扁平写法兜底：`{action:'tools', id:'x'}` —— 只在没有 payload（或 payload 为空）时把顶层其余键当参数。
+  if (Object.keys(payload).length === 0 && body && typeof body === 'object') {
+    for (const [key, value] of Object.entries(body)) {
+      if (key === 'action' || key === 'endpoint' || key === 'op' || key === 'payload') continue
+      payload[key] = value
+    }
+  }
   return { action, payload, raw }
 }
 
@@ -1729,6 +1842,7 @@ function dispatch(svc, action, payload) {
     case 'probe': return svc.probe(payload)
     case 'migrate': return svc.migrate(payload)
     case 'patchInfo': return svc.patchInfo(payload)
+    case 'tools': return svc.tools(payload)
     default: throw new ServiceError('unknown-action', `未知端点：${action || '(空)'}`, { action: `支持：${ENDPOINT_NAMES.join(' | ')}` })
   }
 }

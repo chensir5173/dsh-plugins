@@ -68,9 +68,21 @@
 
 - [x] A10.1 `sub-plugins/dsh-mcp-manager/package.json` 不声明 `dsh.bundle`，目录内无 `cordis.patch.yml`（`bundle.test.mjs`）
 - [x] A10.2 `README.md` + `ACCEPTANCE.md` + `test/*.test.mjs` 齐备
-- [x] A10.3 根外壳 `package.json` 与 `dsh-plugin-manager/package.json` 的 `version` 一致且已 patch 递增（0.3.16 → 0.3.17；`dsh-plugin-manager/test/root-install-shell.test.mjs` 的 "shell and inner package carry the SAME version" 通过）
+- [x] A10.3 根外壳 `package.json` 与 `dsh-plugin-manager/package.json` 的 `version` 一致且已 patch 递增（0.3.16 → 0.3.17 → `0.3.18 → 0.3.19`（§6 工具按钮）；`dsh-plugin-manager/test/root-install-shell.test.mjs` 的 "shell and inner package carry the SAME version" 通过）
 - [x] A10.4 `openspec validate add-mcp-manager-subplugin --strict` 通过
 - [x] A10.5 管理器 7 支测试与其它子插件测试无新增失败（见 E3：唯一失败是 `dsh-idle-hook` 两支既有 `spawn EPERM`）
+
+## A11 工具列表（spec: 单台服务器的工具列表，2026-10-18 追加）
+
+- [x] A11.1 每行「工具」按钮打开对话框，只发一次 `{action:'tools', payload:{id}}`（`bundle.test.mjs:984`）
+- [x] A11.2 静态清单只含公开名以 `mcp__<serverName>__` 开头的已注册工具（含 description，缺失归一为 `''`），**不连接、不起进程**（`host-http.test.mjs:867`；`list` 与静态 `tools` 的 probeRunner 调用数断言为 0）
+- [x] A11.3 静态为空 → `ok:true` + `tools:[]` + `note`（不是错误，`host-http.test.mjs:898`）；面板显示空态说明 + 「真探测」按钮并标注会启动一次 MCP 服务器子进程（`bundle.test.mjs:1027`）
+- [x] A11.4 「真探测」= `{id, mode:'probe'}`：宿主复用探测连接与 `probeTimeoutMs`（默认 8000）请求工具列表，返回 `{mode:'probe', source:'probe', latencyMs, tools[]}`（`host-http.test.mjs:932`、超时复用见 A7.2 追加断言）；面板显示延迟 ms 与「真探测」徽标
+- [x] A11.5 失败就地降级：`probe-failed`（含 `error.latencyMs` 镜像）与 `not-found` 只在对话框内显示错误码 + 重试，面板其它行不受影响（`host-http.test.mjs:959`、`bundle.test.mjs:1056`）
+- [x] A11.6 首屏仍只调一次 `list`：**无** `tools`、**无** `probe` 请求（`bundle.test.mjs:486`）；`list` 响应形状不变
+- [x] A11.7 `ctx.tools` 缺失或 `schemas()` 抛错 → 200 + 空清单 + `reason:'tools-unavailable'` + 诊断 `toolsLookup.registryAvailable=false`（`host-http.test.mjs:910`）
+- [x] A11.8 寻址 `id` 优先于 `serverName`（两者都可，都不匹配 → `not-found`）；兼容旧响应形状（无 `mode`/字符串项/缺 description）不泄漏 `undefined`（`host-http.test.mjs:973`、`bundle.test.mjs:1086`）
+- [x] A11.9 未新增第 5 个模型工具：A8.4 的 4 个 `mcp_manager_*` 断言不变（`host-http.test.mjs`）
 
 ## 已知未覆盖 / 未实测
 
@@ -84,9 +96,9 @@
 
 | 命令 | 结果 |
 |---|---|
-| `node sub-plugins/dsh-mcp-manager/test/host-core.test.mjs` | tests 37 / pass 37 / fail 0（46ms） |
-| `node sub-plugins/dsh-mcp-manager/test/host-http.test.mjs` | tests 25 / pass 25 / fail 0（~1.0s） |
-| `node sub-plugins/dsh-mcp-manager/test/bundle.test.mjs` | 34/34 assertions passed, exit 0 |
+| `node sub-plugins/dsh-mcp-manager/test/host-core.test.mjs` | tests 37 / pass 37 / fail 0（62ms） |
+| `node sub-plugins/dsh-mcp-manager/test/host-http.test.mjs` | tests 31 / pass 31 / fail 0（1.24s）—— 含 §6.1 `tools` 端点 6 条新用例 |
+| `node sub-plugins/dsh-mcp-manager/test/bundle.test.mjs` | 40/40 assertions passed, exit 0 —— 含 §6.2 工具对话框 6 条新用例 |
 
 ### E2 真实 `$DSH_HOME` 只读验收（`node tmp/verify-mcp-manager.mjs`，pass=23 fail=0）
 

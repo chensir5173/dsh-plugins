@@ -491,6 +491,8 @@ test('the first paint calls list only — probing stays on demand', async () => 
   assert.equal(calls[0].headers['x-dsh-plugin'], PKG_ID)
   assert.equal(calls[0].headers['content-type'], 'application/json')
   assert.deepEqual(calls[0].payload, {})
+  assert.equal(calls.filter((call) => call.action === 'tools').length, 0, 'the tool dialog must not be prefetched')
+  assert.equal(calls.filter((call) => call.action === 'probe').length, 0, 'no row may be probed on load')
 })
 
 test('all six managed servers render with the spec columns', async () => {
@@ -977,6 +979,192 @@ test('a late locale service is adopted through the deferred inject', async () =>
   ctx.deferred[0]({ get: (name) => (name === 'locale' ? late : undefined), effect: (fn) => fn(), on: () => {} })
   assert.equal(late.registered.length, 1, 'the late service must receive the dictionaries')
   assert.equal(late.registered[0].dict.en['tab.title'], 'MCP servers')
+})
+
+test('the tools button opens one dialog and asks the host exactly once', async () => {
+  const toolsPayload = {
+    mode: 'static',
+    tools: [
+      { name: 'mcp__context7__resolve-library-id', description: 'Resolve a package name to a Context7 library id' },
+      { name: 'mcp__context7__get-library-docs', description: 'Fetch up-to-date documentation for a library' },
+    ],
+    note: '静态清单为估计值（取自核心工具注册表）',
+  }
+  await boot({
+    locale: makeLocale(),
+    handler: (call) => (call.action === 'tools' ? ok(toolsPayload) : ok(listData())),
+  })
+  assert.deepEqual(calls.map((call) => call.action), ['list'], 'the first paint must only call list')
+  const button = all().find((node) => node.props['data-tools-open'] === 'mcp-context7')
+  assert.ok(button, 'every row must expose a tools button')
+  assert.equal(textOf(button), '工具')
+  button.props.onClick()
+  await settle()
+  const toolsCalls = calls.filter((call) => call.action === 'tools')
+  assert.equal(toolsCalls.length, 1, 'opening the dialog must ask the host exactly once')
+  assert.equal(toolsCalls[0].url, API)
+  assert.equal(toolsCalls[0].method, 'POST')
+  assert.equal(toolsCalls[0].headers['x-dsh-plugin'], PKG_ID)
+  assert.deepEqual(toolsCalls[0].payload, { id: 'mcp-context7' }, 'the static call must not carry mode')
+  assert.equal(withProp('data-tools-dialog', 'mcp-context7').length, 1, 'the dialog must open for that row')
+  assert.equal(cellOf('data-tools-title', 'mcp-context7'), '工具：context7（2 个）')
+  assert.equal(cellOf('data-tools-badge', 'static'), '本机已注册')
+  assert.equal(withProp('data-tool', 'mcp__context7__resolve-library-id').length, 1)
+  assert.equal(cellOf('data-tool-desc', 'mcp__context7__get-library-docs'), 'Fetch up-to-date documentation for a library')
+  assert.ok(treeText().indexOf('静态清单为估计值') !== -1, 'the host note must be shown under the list')
+  const desc = withProp('data-tool-desc', 'mcp__context7__get-library-docs')[0]
+  assert.equal(desc.props['data-expanded'], 'false', 'descriptions start truncated')
+  desc.props.onClick()
+  await settle()
+  assert.equal(withProp('data-tool-desc', 'mcp__context7__get-library-docs')[0].props['data-expanded'], 'true')
+  const copy = withProp('data-tool-copy', 'mcp__context7__get-library-docs')[0]
+  assert.ok(copy, 'every tool must offer a copy button')
+  copy.props.onClick()
+  await settle()
+  assert.equal(textOf(withProp('data-tool-copy', 'mcp__context7__get-library-docs')[0]), '已复制')
+})
+
+test('an empty tool list offers a live probe labelled as spawning a subprocess', async () => {
+  await boot({
+    locale: makeLocale(),
+    handler: (call) => {
+      if (call.action !== 'tools') return ok(listData())
+      return call.payload.mode === 'probe'
+        ? ok({ mode: 'probe', tools: [{ name: 'mcp__context7__resolve-library-id', description: 'resolved live' }], latencyMs: 42 })
+        : ok({ mode: 'static', tools: [] })
+    },
+  })
+  all().find((node) => node.props['data-tools-open'] === 'mcp-context7').props.onClick()
+  await settle()
+  assert.equal(withProp('data-tools-empty', 'true').length, 1, 'the empty state must be explicit')
+  assert.ok(treeText().indexOf('没有可显示的工具') !== -1)
+  const probe = withProp('data-tools-probe', 'mcp-context7')
+  assert.equal(probe.length, 1, 'the empty state must offer a live probe')
+  assert.ok(treeText().indexOf('会启动一次 MCP 服务器子进程') !== -1, 'the subprocess warning must be visible')
+  assert.equal(calls.filter((call) => call.action === 'tools').length, 1, 'no probe may run before the user asks')
+  probe[0].props.onClick()
+  await settle()
+  const toolsCalls = calls.filter((call) => call.action === 'tools')
+  assert.equal(toolsCalls.length, 2)
+  assert.deepEqual(toolsCalls[1].payload, { id: 'mcp-context7', mode: 'probe' })
+  assert.equal(cellOf('data-tools-badge', 'probe'), '真探测')
+  assert.equal(cellOf('data-tools-latency', 'true'), '延迟 42ms')
+  assert.equal(withProp('data-tool', 'mcp__context7__resolve-library-id').length, 1, 'the probe result replaces the empty state')
+  assert.equal(withProp('data-tools-empty', 'true').length, 0)
+})
+
+test('a failed live probe stays inside the dialog and leaves the rows alone', async () => {
+  await boot({
+    locale: makeLocale(),
+    handler: (call) => {
+      if (call.action !== 'tools') return ok(listData())
+      // 真实宿主形状：HTTP 200 + { ok:false, error:{ code, message, latencyMs, fields } }
+      return call.payload.mode === 'probe'
+        ? fail({ code: 'probe-failed', message: 'spawn npx ENOENT', latencyMs: 8001, fields: { latencyMs: 8001, error: 'spawn npx ENOENT' } })
+        : ok({ mode: 'static', tools: [] })
+    },
+  })
+  all().find((node) => node.props['data-tools-open'] === 'mcp-context7').props.onClick()
+  await settle()
+  withProp('data-tools-probe', 'mcp-context7')[0].props.onClick()
+  await settle()
+  assert.equal(withProp('data-tools-error', 'probe-failed').length, 1, 'the failure must be shown in place')
+  assert.ok(treeText().indexOf('spawn npx ENOENT') !== -1)
+  assert.ok(treeText().indexOf('错误码：probe-failed') !== -1)
+  assert.equal(cellOf('data-tools-badge', 'probe'), '真探测', 'a failed probe still reports the mode the user asked for')
+  assert.equal(cellOf('data-tools-latency', 'true'), '延迟 8001ms', 'the latency rides on error.latencyMs')
+  assert.equal(withProp('data-tools-retry', 'true').length, 1, 'the dialog must offer a retry')
+  assert.equal(all().filter((node) => node.props['data-card'] !== undefined).length, 6, 'the rows must stay untouched')
+  withProp('data-tools-retry', 'true')[0].props.onClick()
+  await settle()
+  const toolsCalls = calls.filter((call) => call.action === 'tools')
+  assert.equal(toolsCalls.length, 3, 'the retry must re-ask the host')
+  assert.deepEqual(toolsCalls[2].payload, { id: 'mcp-context7', mode: 'probe' }, 'the retry keeps the failing mode')
+  withProp('data-tools-close', 'true')[0].props.onClick()
+  await settle()
+  assert.equal(withProp('data-tools-dialog', 'mcp-context7').length, 0, 'closing must remove the dialog')
+  assert.equal(all().filter((node) => node.props['data-card'] !== undefined).length, 6, 'the panel stays intact after closing')
+})
+
+test('the dialog reads the data-envelope failure and the tools-unavailable note', async () => {
+  await boot({
+    locale: makeLocale(),
+    handler: (call) => {
+      if (call.action !== 'tools') return ok(listData())
+      if (call.payload.mode === 'probe') {
+        return ok({ ok: false, mode: 'probe', error: { code: 'probe-failed', message: 'connect ECONNREFUSED', latencyMs: 7000 } })
+      }
+      return ok({
+        mode: 'static',
+        source: 'registry',
+        serverName: 'context7',
+        tools: [],
+        note: '静态清单按 mcp__<serverName>__ 前缀统计，工具名超长会被归一化，属估计值（当前读不到宿主工具清单：tools service missing）',
+        reason: 'tools-unavailable',
+      })
+    },
+  })
+  all().find((node) => node.props['data-tools-open'] === 'mcp-context7').props.onClick()
+  await settle()
+  assert.equal(withProp('data-tools-empty', 'true').length, 1)
+  assert.ok(treeText().indexOf('当前读不到宿主工具清单：tools service missing') !== -1, 'the host note must reach the bottom even when the list is empty')
+  assert.equal(cellOf('data-tools-badge', 'static'), '本机已注册')
+  withProp('data-tools-probe', 'mcp-context7')[0].props.onClick()
+  await settle()
+  assert.equal(withProp('data-tools-error', 'probe-failed').length, 1)
+  assert.ok(treeText().indexOf('connect ECONNREFUSED') !== -1)
+  assert.equal(cellOf('data-tools-badge', 'probe'), '真探测')
+  assert.equal(cellOf('data-tools-latency', 'true'), '延迟 7000ms', 'a data-envelope failure keeps its latency too')
+})
+
+test('the tools dialog accepts the older payload shape and never prints undefined', async () => {
+  await boot({
+    locale: makeLocale(),
+    handler: (call) => (call.action === 'tools' ? ok({ tools: [{ name: 'legacy-tool' }, 'string-tool'] }) : ok(listData())),
+  })
+  all().find((node) => node.props['data-tools-open'] === 'mcp-chrome-devtools').props.onClick()
+  await settle()
+  assert.equal(withProp('data-tools-dialog', 'mcp-chrome-devtools').length, 1)
+  assert.equal(cellOf('data-tools-title', 'mcp-chrome-devtools'), '工具：chrome-devtools（2 个）', 'a payload without mode falls back to the static list')
+  assert.equal(cellOf('data-tools-badge', 'static'), '本机已注册')
+  assert.equal(withProp('data-tool', 'legacy-tool').length, 1)
+  assert.equal(withProp('data-tool', 'string-tool').length, 1, 'a bare string is accepted as a tool name')
+  assert.equal(withProp('data-tool-desc', 'legacy-tool').length, 0, 'a missing description renders nothing')
+  assert.ok(treeText().indexOf('undefined') === -1, 'no undefined may leak into the dialog')
+})
+
+test('the tools dialog shows a loading state while the host answers', async () => {
+  let release = null
+  await boot({
+    locale: makeLocale(),
+    handler: (call) => {
+      if (call.action !== 'tools') return ok(listData())
+      return new Promise((resolve) => {
+        release = () => resolve(ok({ mode: 'static', tools: [{ name: 'late-tool', description: 'arrives late' }] }))
+      })
+    },
+  })
+  all().find((node) => node.props['data-tools-open'] === 'mcp-context7').props.onClick()
+  pump()
+  assert.equal(withProp('data-tools-loading', 'true').length, 1, 'the dialog must open in a loading state')
+  assert.ok(treeText().indexOf('正在读取工具清单') !== -1)
+  release()
+  await settle()
+  assert.equal(withProp('data-tools-loading', 'true').length, 0)
+  assert.equal(withProp('data-tool', 'late-tool').length, 1)
+})
+
+test('both dictionaries stay in sync so no face silently falls back to a key name', async () => {
+  const session = await boot({ locale: makeLocale() })
+  const hooks = session.hooks
+  const zh = Object.keys(hooks.zhDict).sort()
+  const en = Object.keys(hooks.enDict).sort()
+  const missingEn = zh.filter((key) => !(key in hooks.enDict))
+  const missingZh = en.filter((key) => !(key in hooks.zhDict))
+  assert.deepEqual(missingEn, [], 'these keys exist only in the Chinese dictionary')
+  assert.deepEqual(missingZh, [], 'these keys exist only in the English dictionary')
+  const empty = zh.filter((key) => !String(hooks.zhDict[key]).length || !String(hooks.enDict[key]).length)
+  assert.deepEqual(empty, [], 'no dictionary value may be empty')
 })
 
 test('no rejection escaped the panel during the whole run', async () => {
