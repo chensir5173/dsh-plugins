@@ -30,6 +30,7 @@ dsh plugin --profile web add <本机仓库根>                                  
 | [`dsh-idle-hook`](../sub-plugins/dsh-idle-hook/README.md) | 模型不在运行时（一轮结束 / 等待批准 / 等待回答）按规则执行**本机脚本**（py/bat/ps1/sh/可执行），把通知送到页面关掉也能到的地方 | 设置 → **空闲通知** | 宿主 + 客户端 | 需 `settings` 服务读规则与 `webServer` 提供设置页/心跳；二者缺席时降级为「无规则不触发」，宿主半照常加载 |
 | [`dsh-agent-preset-manager`](../sub-plugins/dsh-agent-preset-manager/README.md) | 让**本地目录里的 agent preset** 在 0.2.0 上继续可用：运行期声明进宿主注册表，可开关 / 新增 / 编辑 / 删除 / 导入 / 迁移 | 设置 → **本地插件** → tab「Agent 预设」 | 宿主 + 客户端 | 需宿主提供 `agentPresets` 注册表服务（缺席即只读）；不碰 profile 配置 |
 | [`dsh-terminal-font`](../sub-plugins/dsh-terminal-font/README.md) | 把本机已装的 **Nerd Font** 接进侧边栏终端字体栈（`@font-face` + `size-adjust` 归一），修掉 oh-my-posh 提示符的豆腐块 | 自动：样式进页面 `<head>`；设置 →「本地插件」→ tab「终端字体」看诊断 / 改字体 | 客户端 + 空壳宿主（注入样式） | 本机需装 `0xProto Nerd Font (Mono)` 与 `Sarasa Term SC Nerd`；**桌面版须重启 DSH Desktop** |
+| [`dsh-mcp-manager`](../sub-plugins/dsh-mcp-manager/README.md) | 管 `@deepseek-ai/dsh-mcp-client` 条目：列表 / 新增 / 编辑 / 删除 / 启停 / **按 profile 的生效矩阵** / 全局默认参数 / 一键迁移旧标记；**不要求重启** | 设置 →「本地插件」→ tab「MCP 服务器」 | 宿主 + 客户端 | 定义写在 `$DSH_HOME/cordis.patch.yml`（全员）或所选 profile 的 `cordis.patch.yml`（部分）；需 `webServer` 提供 API（缺席即只读降级） |
 
 ## 逐个怎么说"怎么用"
 
@@ -42,6 +43,25 @@ dsh plugin --profile web add <本机仓库根>                                  
 - **诊断**：`GET /__dsh-plugin-manager/status`（含 `pendingWrites` 未落盘数、`lastFlushError`、`lastBatch`、`workspace` / `workspaceRepair` —— **锚点退役视图**，`workspace.ok` 表示已无残留 glob）、`GET /list`（`batchCounts` 含 `enable`/`disable`/`remove` 三向计数，`workspace` 同上，`repairPlan` 为待修依赖）。
 - **退役自净**：退役名单里的插件（当前 2 个，见 `host-core.js` `RETIRED_PLUGIN_DIRS`）不进面板列表；宿主启动时会顺手清空它们在 profile 留下的三种残留（`cordis.patch.yml` 激活行 = DSH 插件列表里的幽灵条目、`package.json` 依赖键、`node_modules/<包名>` 链接点）——先快照真有残留才备份改写、干净零写入，结果在 `/status` `hostDiag.retiredSweep`。
 - **注意**：切换带界面的子插件后，面板只会**提示**你刷新，不会自动刷新页面。
+
+### dsh-mcp-manager — MCP 服务器管理（含按 profile 生效矩阵）
+
+- **入口**：设置 →「本地插件」→ tab「MCP 服务器」（`settings.localPlugins.tab`，id `mcp-servers`，`order: 30`）。数据全走 `POST /__dsh-mcp-manager/api`（`{action,payload}`，需 `x-dsh-plugin: dsh-mcp-manager` 头 + 同源）。
+- **管什么**：所有 `name: '@deepseek-ai/dsh-mcp-client'` 的 loader 条目（**一台服务器 = 一条 loader 条目**）。列表给出 id / serverName / transport / 落点层 / 生效 profile 集合 / 静态状态（未加载·加载中·已激活·失败·已停用；取不到就显示「—」）/ 工具数估计（`mcp__<serverName>__` 前缀计数，同样可为「—」）。
+- **矩阵语义（与上游 0.1.x 最大的不同）**：每台单独勾选生效 profile。
+  - 全员 → 只在 `$DSH_HOME/cordis.patch.yml` 写一条 insert（新 profile 默认继承）；
+  - 部分 → home 里移除，改写到被选中的各 profile 的 `cordis.patch.yml`，**未选中的零写入**；
+  - 全不 → 保留 home 一条、行内 `disabled: true`。
+  为什么不能「在未选中的 profile 写 `disabled` 覆盖行」：loader 按 **bundle → profile patch → home patch → CLI overlay** 应用，而 `{ id, … }` 覆盖补丁只能命中**此前已存在**的条目，因此对 home 层 insert 的覆盖行会被静默跳过（三态实测见 [`docs/knowledge/2026-10-18-mcp-manager-subplugin.md`](knowledge/2026-10-18-mcp-manager-subplugin.md)）。
+- **写盘安全**：只做**行级块替换**（绝不整文件重新序列化），原子写（同目录临时文件 + rename），写前备份 `<文件名>.bak-<yyyyMMdd-HHmmss>` 且只留最近 10 份，CRLF/LF 与末尾换行沿用；除目标行块外**逐字不变**（中文注释、`!!js` 表达式都不动）；同一文件的写操作串行化。
+- **一次性迁移**：把旧标记 `# dsh-mcp-manager:server:<id>` 升级为 `# dsh-mcp-manager:2:server:<id>`，给形态匹配但没标记的条目补标记，并把同层 `disable` 覆盖行收敛进 insert 行的 `disabled: true`。**先预览后执行**（面板报将改写/补齐/收敛/跳过各几条），执行前备份，幂等。
+- **测试连接**：只有点按钮才起一次 MCP 子进程 / HTTP 握手，默认 8s 超时（`probeTimeoutMs`），返回延迟与工具数；**列表加载永不探测**。
+- **全局默认参数**：`$DSH_HOME/.dsh-mcp-manager/state.json`（`toolCallTimeoutMs` / `maxInstructionBytes` / `failOnStartupError` / `probeTimeoutMs` / 已知 profile 集合）。新增与编辑时作初值，保存时落成 config 内具体字段，不写「默认」语义的键。
+- **YAML 兜底**：编辑页的 YAML 子页填**整段 config 的 YAML**（不含 `- insert:` 外壳与标记）即可提交；宿主先结构化校验，通过后与表单走**同一条写盘路径**（两条路径产出的块逐字相同），非法 YAML 返回 `bad-yaml` + 逐字段原因且零写入。
+- **模型工具**（需 `@deepseek-ai/dsh-tools` 可解析，否则整体跳过并写诊断）：`mcp_manager_list` / `mcp_manager_set_enabled` / `mcp_manager_restart` / `mcp_manager_add`。
+- **生效时机**：写 patch 会触发 DSH 的 patch HMR（本 profile 内热生效，整树重应用；本仓既往实测 0.7–1.2s）。`restart` 的语义就是「重写该条目块触发重应用」，**不承诺进程已被杀**；**其它 profile 要等它自己重载**——跨 profile 写入会二次确认并标注这一点。
+- **诊断**：`$DSH_HOME/.dsh-mcp-manager/host-diag.json`（路由注册、服务缺失、写失败、重复注册等）；`list.diagnostics` 原样透出冲突与孤儿覆盖行（`E_ORPHAN_OVERRIDE`）。
+- **降级**：`webServer` 缺席 → 端点不注册、面板显示「宿主端点不可用」并只读；`loader` / `tools` 缺席 → 对应字段显示「—」，其余照常。
 
 ### dsh-composer-history-recall — 输入框历史召回
 
@@ -161,11 +181,11 @@ dsh plugin --profile web add <本机仓库根>                                  
 | composer 右侧组 `conversation.input.right` | `dsh-composer-provider-label`（10，紧邻核心模型选择器左侧） |
 | 会话头操作区 `conversation.session.header.actions` | `dsh-session-title-regenerate`（27）· `dsh-esc-rewind` 处置开关（28）；核心自身另有 日程(10)/任务(20)/删除(30)。~~`dsh-open-session-workdir`（25）~~ 已于 2026-09-18 退役 |
 | 设置页 `settings.section` | `dsh-plugin-manager`「本地插件」（16）——本仓**唯一**的一条导航行，其余插件不再各占一行 |
-| 「本地插件」页内的 tab `settings.localPlugins.tab` | `dsh-plugin-manager`（`plugins` 0）· `dsh-agent-preset-manager`「Agent 预设」（`agent-presets` 20）· `dsh-idle-hook`（`idle-hook` 40）· `dsh-esc-rewind`「子代理」（`subagents` 50） |
+| 「本地插件」页内的 tab `settings.localPlugins.tab` | `dsh-plugin-manager`（`plugins` 0）· `dsh-agent-preset-manager`「Agent 预设」（`agent-presets` 20）· `dsh-mcp-manager`「MCP 服务器」（`mcp-servers` 30）· `dsh-idle-hook`（`idle-hook` 40）· `dsh-esc-rewind`「子代理」（`subagents` 50） |
 | 斜杠命令 | `/rewind`（客户端 `commandUi` 贡献）· `/regenerate-title`（宿主命令） |
 | 侧栏会话行 `⋯` 菜单 | `dsh-session-title-regenerate`（DOM 注入，核心无插件槽） |
 | 侧栏会话列表 | `dsh-session-time-bucket`（就地注入组头 + `[工作区]` 前缀，非槽位） |
-| 宿主 HTTP | `/__dsh-plugin-manager/{status,list,set-enabled,set-all-enabled,remove,migrate}` · `/__esc-rewind/{status,session/delete}` · `/__idle-hook/{status,presence,history,clear-history,test-run,reset-rule}` · `/__dsh-agent-presets/{state,file,set-enabled,create,save,remove,import,migrate}` |
+| 宿主 HTTP | `/__dsh-plugin-manager/{status,list,set-enabled,set-all-enabled,remove,migrate}` · `/__esc-rewind/{status,session/delete}` · `/__idle-hook/{status,presence,history,clear-history,test-run,reset-rule}` · `/__dsh-agent-presets/{state,file,set-enabled,create,save,remove,import,migrate}` · `/__dsh-mcp-manager/api`（单入口 `{action,payload}`，需 `x-dsh-plugin: dsh-mcp-manager` 头） |
 
 > `/__hindsight-model/*` 与「本地插件」页里的 `hindsight-model` tab 随 2026-10-09 退役一并消失（源码保留在仓库）。
 
