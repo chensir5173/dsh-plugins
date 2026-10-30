@@ -889,3 +889,76 @@ test('listProfiles / profilePatchPath / statePath / defaultState：路径与默�
   assert.equal(JSON.stringify(st).includes('dsh-mcp-manager:2:'), false, 'state.json 不得含 patch 语义')
   assert.notEqual(defaultState(), st, '每次返回新对象')
 })
+
+// ═══════════════════════ ⑨ 官方模板的空数组占位 `[]` ═══════════════════════
+
+/**
+ * DSH `initProfile()` 写给每个新 profile 的 patch 模板（逐字拷贝自
+ * `packages/boot/app-boot/src/profile.ts` 的 `PROFILE_PATCH_TEMPLATE`）。
+ * 官方 loader 用 `yaml.load` 后只要求结果是数组，所以 `[]` 合法；只有注释的文件会解析成 `null`
+ * 并被拒绝。插件必须接受前者、并且不能产出后者。
+ */
+const PROFILE_TEMPLATE = [
+  '# Your patch layer for this dsh profile, applied after every bundle layer:',
+  '# a top-level YAML array of loader patch entries (id-targeted config',
+  '# overrides, disables, and insert lists; `!!js` expressions allowed).',
+  '[]',
+  '',
+].join('\n')
+
+test('⑨ 官方模板（注释 + 顶层 []）：解析通过、零条目、记录占位行', () => {
+  const p = parsePatch(PROFILE_TEMPLATE)
+  assert.equal(p.ok, true)
+  assert.equal(p.error, null)
+  assert.deepEqual(p.entries, [])
+  assert.deepEqual(p.overrides, [])
+  assert.equal(p.lines.length, 4)
+  assert.equal(p.placeholderLine, 3)
+})
+
+test('⑨ 带缩进的 [ ] 等价于 []；两处占位拒绝', () => {
+  assert.equal(parsePatch('[]\n').placeholderLine, 0)
+  assert.equal(parsePatch('[ ]\n').placeholderLine, 0)
+  const dup = parsePatch('[]\n# x\n[]\n')
+  assert.equal(dup.ok, false)
+  assert.equal(dup.error.code, 'E_NOT_SEQUENCE')
+  assert.equal(dup.error.line, 3)
+})
+
+test('⑨ 占位与条目混排仍拒绝：flow 空序列后不能接块序列', () => {
+  const bad = PROFILE_TEMPLATE + buildInsertBlock('mcp-demo', DEMO_CONFIG, '\n')
+  const p = parsePatch(bad)
+  assert.equal(p.ok, false)
+  assert.equal(p.error.code, 'E_NOT_SEQUENCE')
+  assert.match(p.error.message, /混排/)
+})
+
+test('⑨ planUpsert 在模板上新增条目：摘掉 []、注释逐字保留、产物可再解析', () => {
+  const res = planUpsert(PROFILE_TEMPLATE, 'mcp-demo', DEMO_CONFIG)
+  assert.equal(res.error, null)
+  assert.equal(res.action, 'insert')
+  assert.equal(res.text.includes('[]'), false, '占位行必须被摘掉')
+  assert.ok(res.text.startsWith('# Your patch layer for this dsh profile'), '模板注释逐字保留')
+  const again = parsePatch(res.text)
+  assert.equal(again.ok, true)
+  assert.equal(again.entries.length, 1)
+  assert.equal(again.entries[0].id, 'mcp-demo')
+  assert.equal(again.placeholderLine, -1)
+})
+
+test('⑨ planRemove 删掉最后一条后回填空数组：注释保留、文本回到模板、官方语义仍成立', () => {
+  const added = planUpsert(PROFILE_TEMPLATE, 'mcp-demo', DEMO_CONFIG).text
+  const res = planRemove(added, 'mcp-demo')
+  assert.equal(res.error, null)
+  assert.equal(res.action, 'remove')
+  assert.equal(res.text, PROFILE_TEMPLATE, '删光条目后应与官方模板逐字一致')
+  assert.equal(parsePatch(res.text).placeholderLine, 3)
+})
+
+test('⑨ planRemove 从裸块删到空：产出 [] 而不是空文件', () => {
+  const single = buildInsertBlock('mcp-demo', DEMO_CONFIG, '\n')
+  const res = planRemove(single, 'mcp-demo')
+  assert.equal(res.error, null)
+  assert.equal(res.text, '[]\n')
+  assert.equal(parsePatch(res.text).ok, true)
+})

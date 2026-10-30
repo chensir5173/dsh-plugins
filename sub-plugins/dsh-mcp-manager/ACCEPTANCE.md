@@ -37,6 +37,9 @@
 - [x] A5.2 原子写 + 写前备份 `<文件名>.bak-<时间戳>`，同目录只保留最近 10 份（`host-http.test.mjs`）
 - [x] A5.3 同一文件并发写被串行化（后写者看到前写者的结果）（`host-http.test.mjs`）
 - [x] A5.4 文件不是合法 YAML → 只读降级：写端点报错、文件未改、无备份残留（`host-http.test.mjs`）
+- [x] A5.5 官方 profile 模板形态（3 行注释 + 顶层 `[]`）解析为合法空文档：`ok=true`、`entries` 空、`placeholderLine` 指向占位行；`[ ]` 等价；两处占位、占位与 `- id:` 条目混排仍判 `E_NOT_SEQUENCE`（`host-core.test.mjs` ⑨ 组 ①②③）
+- [x] A5.6 在模板上新增条目：先摘占位再追加块，产物无 `[]` 残留、注释前缀保留、可再次解析（`host-core.test.mjs` ⑨ 组 ④）
+- [x] A5.7 删掉最后一条后回填 `[]`：模板 upsert→remove 往返后文本与模板逐字一致，裸块删空得到 `'[]\n'`，不产出只有注释（`yaml.load` 得 null）的文件（`host-core.test.mjs` ⑨ 组 ⑤⑥）
 
 ## A6 面板（spec: 面板与状态展示）
 

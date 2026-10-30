@@ -155,6 +155,28 @@ function isEntryHead(bare) {
   return t === '-' || /^-\s/.test(t)
 }
 
+/**
+ * 顶层空 flow 序列占位行：整行（含缩进 0）只有 `[]` 或 `[ ]`。
+ *
+ * DSH 的 `initProfile()` 给每个新 profile 写入的模板末尾就是一行 `[]`（合法的空 YAML 数组），
+ * 官方 loader 的 `parsePatchList` 用 `yaml.load` 解析后只要求 `Array.isArray(parsed)`，
+ * 所以 `[]` 是**合法文档**；而只有注释的文件会解析成 `null` 并被官方直接拒绝。
+ * 本插件的行级拼贴不认 flow 风格，历史上把它当成非法行报 E_NOT_SEQUENCE，于是新 profile
+ * 会让整台机器进入只读降级。
+ */
+function isEmptySeqPlaceholder(bare) {
+  const b = bareOf(bare)
+  return indentOf(b) === 0 && /^\[\s*\]$/.test(b.trim())
+}
+
+/** 文档里第一处占位行的下标（0 基）；没有返回 `-1`。 */
+function findPlaceholderLine(lines) {
+  for (let i = 0; i < lines.length; i++) {
+    if (isEmptySeqPlaceholder(lines[i])) return i
+  }
+  return -1
+}
+
 // ═══════════════════════════ 标量渲染 / 解析 ═══════════════════════════
 
 /** YAML 标量渲染：字符串走 JSON 双引号（转义反斜杠，Windows 路径安全），其它走 `String()`。 */
@@ -607,17 +629,20 @@ function parseOverrideBody(lines, headIndex, to) {
  *   others: Array<object>,
  *   eol: string,
  *   lines: string[],
- *   raw: string
+ *   raw: string,
+ *   placeholderLine: number
  * }}
  *   `entries` 是**受管的 MCP insert 条目**（`{ id, serverName, transport, hasMarker, markerKind,
  *   blockStart, blockEnd, disabled, … }`；同层 disable 覆盖行的效果已折算进 `disabled`）。
+ *   `placeholderLine` 是顶层空数组占位 `[]` 的行下标（0 基；没有为 `-1`）——新增条目时必须先删掉它。
  */
 export function parsePatch(text) {
   const raw = String(text ?? '')
   const lines = splitKeepEol(raw)
   const eol = detectEol(raw)
   const parseError = detectParseError(lines)
-  const base = { ok: false, error: parseError, entries: [], overrides: [], others: [], eol, lines, raw }
+  const placeholderLine = findPlaceholderLine(lines)
+  const base = { ok: false, error: parseError, entries: [], overrides: [], others: [], eol, lines, raw, placeholderLine }
   if (parseError) return base
 
   const scan = scanBlocks(lines)
@@ -696,12 +721,37 @@ function detectParseError(lines) {
       return { code: 'E_TAB_INDENT', message: `第 ${i + 1} 行用 Tab 缩进：无法判定层级，拒绝写入（请改成空格）`, line: i + 1 }
     }
   }
+  let placeholder = -1
   for (let i = 0; i < lines.length; i++) {
     const bare = bareOf(lines[i])
     const t = bare.trim()
     if (indentOf(bare) !== 0 || t === '') continue
     if (t.startsWith('#') || isEntryHead(bare) || t.startsWith('---') || t.startsWith('%')) continue
+    if (isEmptySeqPlaceholder(bare)) {
+      if (placeholder >= 0) {
+        return { code: 'E_NOT_SEQUENCE', message: `第 ${i + 1} 行出现第二处顶层空数组占位 []（只能有一处）：${t.slice(0, 60)}`, line: i + 1 }
+      }
+      placeholder = i
+      continue
+    }
     return { code: 'E_NOT_SEQUENCE', message: `第 ${i + 1} 行不是顶层数组条目（patch 必须是顶层 YAML 数组）：${t.slice(0, 60)}`, line: i + 1 }
+  }
+  // `[]` 必须独占文档：YAML 不允许 flow 空序列之后再接块序列（`[]` 下面跟 `- id:` 会让官方 loader 解析失败）。
+  if (placeholder >= 0) {
+    for (let i = 0; i < lines.length; i++) {
+      if (i === placeholder) continue
+      const bare = bareOf(lines[i])
+      if (indentOf(bare) !== 0) continue
+      const t = bare.trim()
+      if (t === '' || t.startsWith('#') || t.startsWith('---') || t.startsWith('%')) continue
+      if (isEntryHead(bare)) {
+        return {
+          code: 'E_NOT_SEQUENCE',
+          message: `第 ${i + 1} 行与第 ${placeholder + 1} 行的空数组占位 [] 混排：flow 空序列后不能接块序列，请删掉 []`,
+          line: i + 1,
+        }
+      }
+    }
   }
   for (let i = 0; i < lines.length; i++) {
     const bare = bareOf(lines[i])
@@ -717,6 +767,7 @@ function detectParseError(lines) {
     for (let i = chunk.start; i < chunk.end; i++) {
       const t = bareOf(lines[i]).trim()
       if (t === '' || /^(---|\.\.\.|%)/.test(t)) continue
+      if (isEmptySeqPlaceholder(lines[i])) continue
       return { code: 'E_ORPHAN_INDENT', message: `第 ${i + 1} 行是孤立缩进行（不属于任何顶层条目）：无法安全做行级拼贴，拒绝写入`, line: i + 1 }
     }
   }
@@ -989,7 +1040,9 @@ function applyUpsert(text, id, config, opts) {
     if (!create) return { text: raw, changed: false, action: 'none', error: { code: 'E_NOT_FOUND', message: `未找到条目 ${id}` } }
     const block = buildInsertBlock(id, config, eol, opts)
     const recs = toRecs(parsed.lines)
-    const out = recs.slice()
+    // 顶层 `[]` 占位（DSH 的 PROFILE_PATCH_TEMPLATE）必须先摘掉：否则块序列会追加在 flow 空序列后面，
+    // 产出的 YAML 连官方 loader 都解析不了。
+    const out = parsed.placeholderLine >= 0 ? recs.filter((_, i) => i !== parsed.placeholderLine) : recs.slice()
     if (out.length && out[out.length - 1].eol === '') out[out.length - 1] = { ...out[out.length - 1], eol }
     for (const line of splitKeepEol(block)) out.push({ bare: bareOf(line), eol: eolOfRaw(line) || eol })
     const next = recsToText(out)
@@ -1004,6 +1057,26 @@ function applyUpsert(text, id, config, opts) {
   for (const ov of entry._overrides) skips.push({ start: ov.blockStart, end: ov.blockEnd })
   const next = recsToText(assemble(toRecs(parsed.lines), entry.blockStart, res.recs, entry.blockEnd, skips))
   return { text: next, changed: next !== raw, action: 'update', error: null }
+}
+
+/**
+ * 写盘前的最后一道保险：patch 必须是顶层 YAML 数组。
+ *
+ * 官方 loader 用 `yaml.load` 后要求 `Array.isArray(parsed)`：只剩注释/空行的文件会解析成 `null`
+ * 并被直接拒绝（`must be a top-level YAML array of loader patch entries`）。删掉最后一条条目后
+ * 文件就可能变成这种形状，这里按官方模板补一行 `[]` 占位。已有条目或占位、或遇到不认识的内容行
+ * 都原样返回，绝不猜用户的意图。
+ */
+function ensureArrayDocument(text, eol) {
+  const s = String(text ?? '')
+  for (const raw of splitKeepEol(s)) {
+    const bare = bareOf(raw)
+    const t = bare.trim()
+    if (t === '' || t.startsWith('#') || t.startsWith('---') || t.startsWith('%')) continue
+    return s
+  }
+  const nl = /(\r\n|\n|\r)$/.test(s) || s === '' ? '' : eol
+  return `${s}${nl}[]${eol}`
 }
 
 /**
@@ -1027,7 +1100,7 @@ export function planRemove(text, id) {
     if (skips.some((s) => i >= s.start && i < s.end)) continue
     keep.push(recs[i])
   }
-  const next = recsToText(keep)
+  const next = ensureArrayDocument(recsToText(keep), parsed.eol)
   return { text: next, changed: next !== raw, action: 'remove', error: null }
 }
 
