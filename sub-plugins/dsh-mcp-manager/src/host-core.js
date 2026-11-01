@@ -155,6 +155,24 @@ function isEntryHead(bare) {
   return t === '-' || /^-\s/.test(t)
 }
 
+/**
+ * 顶层**流式空数组**（`[]` / `[ ]` / `[\t]`）：DSH 新建 profile 时生成的空 patch 模板。
+ * 语义等价「文档里没有任何条目」，但 **不能** 与 `- insert:` 条目共存 ——
+ * YAML 里 `[]` 之后接序列项是非法文档，写入前必须把这一行摘掉。
+ */
+function isFlowEmptyDoc(bare) {
+  return /^\[\s*\]$/.test(String(bare).trim())
+}
+
+/** 首个顶层 `[]` 行的下标（没有则 `null`）。 */
+function flowEmptyDocLine(lines) {
+  for (let i = 0; i < lines.length; i++) {
+    const bare = bareOf(lines[i])
+    if (indentOf(bare) === 0 && isFlowEmptyDoc(bare)) return i
+  }
+  return null
+}
+
 // ═══════════════════════════ 标量渲染 / 解析 ═══════════════════════════
 
 /** YAML 标量渲染：字符串走 JSON 双引号（转义反斜杠，Windows 路径安全），其它走 `String()`。 */
@@ -617,7 +635,18 @@ export function parsePatch(text) {
   const lines = splitKeepEol(raw)
   const eol = detectEol(raw)
   const parseError = detectParseError(lines)
-  const base = { ok: false, error: parseError, entries: [], overrides: [], others: [], eol, lines, raw }
+  const base = {
+    ok: false,
+    error: parseError,
+    entries: [],
+    overrides: [],
+    others: [],
+    eol,
+    lines,
+    raw,
+    // 顶层 `[]` 空文档标记所在行（没有则 null）；写入新条目时要先摘掉这一行。
+    flowEmptyDoc: flowEmptyDocLine(lines),
+  }
   if (parseError) return base
 
   const scan = scanBlocks(lines)
@@ -696,12 +725,28 @@ function detectParseError(lines) {
       return { code: 'E_TAB_INDENT', message: `第 ${i + 1} 行用 Tab 缩进：无法判定层级，拒绝写入（请改成空格）`, line: i + 1 }
     }
   }
+  let flowDocLine = null
   for (let i = 0; i < lines.length; i++) {
     const bare = bareOf(lines[i])
     const t = bare.trim()
     if (indentOf(bare) !== 0 || t === '') continue
     if (t.startsWith('#') || isEntryHead(bare) || t.startsWith('---') || t.startsWith('%')) continue
+    // DSH 新建 profile 的空 patch 模板就是顶格 `[]`：合法空文档，不是坏结构。
+    if (isFlowEmptyDoc(bare)) {
+      if (flowDocLine !== null) {
+        return { code: 'E_FLOW_DOC_CONFLICT', message: `第 ${i + 1} 行是重复的顶层空数组 []（首个在第 ${flowDocLine + 1} 行）`, line: i + 1 }
+      }
+      flowDocLine = i
+      continue
+    }
     return { code: 'E_NOT_SEQUENCE', message: `第 ${i + 1} 行不是顶层数组条目（patch 必须是顶层 YAML 数组）：${t.slice(0, 60)}`, line: i + 1 }
+  }
+  // `[]` 表示「零条目」，只能独占文档；与任何条目并存都是非法 YAML。
+  if (flowDocLine !== null) {
+    const clashing = lines.findIndex((raw, i) => i !== flowDocLine && indentOf(bareOf(raw)) === 0 && isEntryHead(bareOf(raw)))
+    if (clashing >= 0) {
+      return { code: 'E_FLOW_DOC_CONFLICT', message: `第 ${flowDocLine + 1} 行的顶层空数组 [] 与第 ${clashing + 1} 行的条目并存（非法 YAML）`, line: flowDocLine + 1 }
+    }
   }
   for (let i = 0; i < lines.length; i++) {
     const bare = bareOf(lines[i])
@@ -716,7 +761,7 @@ function detectParseError(lines) {
     if (chunk.kind !== 'free') continue
     for (let i = chunk.start; i < chunk.end; i++) {
       const t = bareOf(lines[i]).trim()
-      if (t === '' || /^(---|\.\.\.|%)/.test(t)) continue
+      if (t === '' || isFlowEmptyDoc(t) || /^(---|\.\.\.|%)/.test(t)) continue
       return { code: 'E_ORPHAN_INDENT', message: `第 ${i + 1} 行是孤立缩进行（不属于任何顶层条目）：无法安全做行级拼贴，拒绝写入`, line: i + 1 }
     }
   }
@@ -990,6 +1035,9 @@ function applyUpsert(text, id, config, opts) {
     const block = buildInsertBlock(id, config, eol, opts)
     const recs = toRecs(parsed.lines)
     const out = recs.slice()
+    // 空 patch 模板的 `[]` 代表「零条目」：先摘掉它，再接 `- insert:`，
+    // 否则写出的是 `[]` 后跟序列项的非法 YAML。
+    if (parsed.flowEmptyDoc !== null && parsed.flowEmptyDoc !== undefined) out.splice(parsed.flowEmptyDoc, 1)
     if (out.length && out[out.length - 1].eol === '') out[out.length - 1] = { ...out[out.length - 1], eol }
     for (const line of splitKeepEol(block)) out.push({ bare: bareOf(line), eol: eolOfRaw(line) || eol })
     const next = recsToText(out)

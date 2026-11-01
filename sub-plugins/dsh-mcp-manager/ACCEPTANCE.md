@@ -17,6 +17,7 @@
 - [x] A2.2 profile 列表来自 `$DSH_HOME/profiles/*` 磁盘目录，`node_modules` 与文件不作为 profile（`host-core.test.mjs`）
 - [x] A2.3 已知 profile 集合变化导致落点与期望形态不一致时 → 标记「布局待修复/待确认」并给出建议动作与目标文件，**不写文件**（`host-core.test.mjs` 的 `NEW_PROFILE` / `INEFFECTIVE_OVERRIDE`）
 - [x] A2.4 部分生效的服务器遇到新 profile 时标记待确认，MUST NOT 自动写入（`host-core.test.mjs` + `host-http.test.mjs`）
+- [x] A2.5 顶层 `[]` 空模板（DSH 0.2.1-rc.5 新建 profile 时生成的空 patch 文件）按「0 条目」处理：`patchInfo.profiles.<p>.ok === true`、`error === null`（不再触发整块只读降级）；写入时先摘掉 `[]` 行再拼条目块（YAML 里 `[]` 后不许接 `- `），行首注释逐字保留（`host-core.test.mjs` 的「⑤-补 DSH 空 patch 模板」+ `host-http.test.mjs` 的 A2.5 端到端）
 
 ## A3 全局默认参数（spec: 全局默认参数）
 
@@ -57,6 +58,7 @@
 - [x] A8.2 body > 1 MiB → 413（`host-http.test.mjs`）
 - [x] A8.3 `@deepseek-ai/dsh-tools` 不可解析 → 跳过工具注册、不抛错、HTTP 与面板仍可用（`host-http.test.mjs`）
 - [x] A8.4 4 个工具（`mcp_manager_list/set_enabled/restart/add`）在包可用时注册，能力与 HTTP 端点等价（代码核对 `src/index.js:1850/1856/1865/1873` + `host-http.test.mjs` 的桩断言）
+- [x] A8.5 每个工具的 `defineTool` 选项都带 `output: { schema: { type:'string' }, render }`（execute 返回 JSON 字符串，render 返回单个 text ContentBlock）：DSH 0.2.x 的 `defineTool` 在定义期直接读 `options.output.render`/`.schema`，缺 `output` 抛 TypeError 且错误被最后一个 spec 吞掉 ⇒ 4 个工具**全部**注册失败（`host-http.test.mjs` 的 `FAKE_TOOLS_MODULE` 按真实契约做参数校验，空壳假实现无法蒙混）
 
 ## A9 与既有插件/条目互不干扰（spec: 与既有插件和条目互不干扰）
 
@@ -68,7 +70,7 @@
 
 - [x] A10.1 `sub-plugins/dsh-mcp-manager/package.json` 不声明 `dsh.bundle`，目录内无 `cordis.patch.yml`（`bundle.test.mjs`）
 - [x] A10.2 `README.md` + `ACCEPTANCE.md` + `test/*.test.mjs` 齐备
-- [x] A10.3 根外壳 `package.json` 与 `dsh-plugin-manager/package.json` 的 `version` 一致且已 patch 递增（0.3.16 → 0.3.17（首版）→ 0.3.18 → 0.3.19（§6 工具按钮）→ 0.3.19 → 0.3.20（工具对话框失败态耗时/徽标修正）→ 0.3.20 → 0.3.21（归档本变更并同步主规格）；`dsh-plugin-manager/test/root-install-shell.test.mjs` 的 "shell and inner package carry the SAME version" 通过）
+- [x] A10.3 根外壳 `package.json` 与 `dsh-plugin-manager/package.json` 的 `version` 一致且已 patch 递增（0.3.16 → 0.3.17（首版）→ 0.3.18 → 0.3.19（§6 工具按钮）→ 0.3.19 → 0.3.20（工具对话框失败态耗时/徽标修正）→ 0.3.20 → 0.3.21（归档本变更并同步主规格）→ 0.3.22（工具列表静态优先 + 空态真探测）→ 0.3.23（DSH 0.2.1-rc.5 兼容：`defineTool.output` 必填、顶层 `[]` 空模板）；`dsh-plugin-manager/test/root-install-shell.test.mjs` 的 "shell and inner package carry the SAME version" 通过）
 - [x] A10.4 归档前 `openspec validate add-mcp-manager-subplugin --strict` 通过；2026-10-18 已把 delta 同步进 `openspec/specs/mcp-manager/spec.md` 并归档到 `openspec/changes/archive/2026-10-18-add-mcp-manager-subplugin/`
 - [x] A10.5 管理器 7 支测试与其它子插件测试无新增失败（见 E3：唯一失败是 `dsh-idle-hook` 两支既有 `spawn EPERM`）
 

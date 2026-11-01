@@ -480,6 +480,48 @@ test('⑤ 无法解析的文件：所有写操作都拒绝且原文不变、无 
   }
 })
 
+test('⑤-补 DSH 空 patch 模板（顶层 []）：解析为 0 条目，写入前摘掉 []，产出仍是顶层数组', () => {
+  // DSH 新建 profile 时生成的模板：三行注释 + 顶格 []
+  const empty = '# DSH 补丁层：profile dsh-tui（由 dsh 新建）\n# 本文件由 dsh 维护\n# 除非你清楚在做什么，否则不要手动编辑\n[]\n'
+  const p = parsePatch(empty)
+  assert.equal(p.ok, true, JSON.stringify(p.error))
+  assert.equal(p.error, null)
+  assert.equal(p.flowEmptyDoc, 3)
+  assert.deepEqual(p.entries, [])
+  // 空文档没有条目：启用/删除照旧报 E_NOT_FOUND（不是结构错误）
+  assert.equal(planSetEnabled(empty, 'mcp-demo', false).error.code, 'E_NOT_FOUND')
+  assert.equal(planRemove(empty, 'mcp-demo').error.code, 'E_NOT_FOUND')
+
+  const up = planUpsert(empty, 'mcp-demo', DEMO_CONFIG)
+  assert.equal(up.error, null, JSON.stringify(up.error))
+  assert.equal(up.action, 'insert')
+  assert.equal(up.changed, true)
+  const text = up.text
+  assert.ok(!/^\s*\[\s*\]\s*$/m.test(text), `[] 必须被摘掉：\n${text}`)
+  assert.match(text, /# dsh-mcp-manager:2:server:mcp-demo\n- insert:\n/, text)
+  // 注释逐字保留、顺序不变
+  assert.ok(text.startsWith('# DSH 补丁层：profile dsh-tui（由 dsh 新建）\n# 本文件由 dsh 维护\n# 除非你清楚在做什么，否则不要手动编辑\n'), text)
+  // 二次解析：合法、条目可见、空文档标记消失
+  const again = parsePatch(text)
+  assert.equal(again.ok, true, JSON.stringify(again.error))
+  assert.equal(again.flowEmptyDoc, null)
+  assert.deepEqual(again.entries.map((e) => e.id), ['mcp-demo'])
+
+  // `[ ]` 变体同样识别
+  const spaced = parsePatch('# x\n[ ]\n')
+  assert.equal(spaced.ok, true)
+  assert.equal(spaced.flowEmptyDoc, 1)
+  assert.ok(!/^[ \t]*\[ \]\s*$/m.test(planUpsert('# x\n[ ]\n', 'mcp-demo', DEMO_CONFIG).text))
+
+  // [] 与条目并存 → 非法 YAML，明确报错而不是静默改写
+  const mixed = parsePatch('[]\n- insert:\n    - id: mcp-demo\n')
+  assert.equal(mixed.ok, false)
+  assert.equal(mixed.error.code, 'E_FLOW_DOC_CONFLICT')
+  const twice = parsePatch('[]\n[]\n')
+  assert.equal(twice.ok, false)
+  assert.equal(twice.error.code, 'E_FLOW_DOC_CONFLICT')
+})
+
 test('⑤ 未知 id 的写操作报 E_NOT_FOUND 且原文不变', () => {
   const r = planSetEnabled(HOME, 'mcp-nope', false)
   assert.equal(r.changed, false)

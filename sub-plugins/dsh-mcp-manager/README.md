@@ -38,6 +38,19 @@ DSH 的 loader 按 **bundle 层 → profile 自己的 `cordis.patch.yml` → `$D
 - 每次操作先重读文件、重新定位行块；同一文件的写操作串行化。
 - 文件无法解析时**只读降级**：面板说明原因，所有写端点拒绝且不产生备份。
 
+## DSH 版本兼容
+
+实测基线：**DSH 0.2.1-rc.5**（桌面版）。0.2.1 有两条契约变化会让按 0.2.0 写的插件直接失灵，本插件都已适配：
+
+| 契约 | 0.2.1-rc.5 的行为 | 本插件的处理 |
+|---|---|---|
+| `defineTool` 的 `output` | 定义期直接读 `options.output.render` / `.schema`，漏传即 TypeError；该错误会被最后一个 spec 覆盖 ⇒ 4 个模型工具**全部**注册失败 | 4 个工具都显式声明 `output: { schema: { type: 'string' }, render }`（execute 返回 JSON 文本，render 原样透出为 text ContentBlock） |
+| 空 patch 模板 | 新建 profile 的 `cordis.patch.yml` 是顶格 `[]`（流式空数组）。旧解析把它当 `E_NOT_SEQUENCE` ⇒ 该 profile 整块**只读降级**，面板不能改 | 顶层 `[]` 按「0 条目」处理：`patchInfo` 判 `ok` 不锁面板；写入前先摘掉 `[]` 行再拼条目块（YAML 里 `[]` 后不许接 `- `）；`[]` 与非空条目并存判 `E_FLOW_DOC_CONFLICT` |
+
+其余兼容面已在 0.2.1-rc.5 桌面版逐项核对，均「存在且签名未变」：`webServer.register({ kind: 'exact' | 'prefix' })`、`tools.schemas()`、`settings.prepareDocument()`、`profileContext`、`storageDomain`、`remote.*`、`locale`。`settings.installSection` 在 0.2.x 仍不存在 —— 本插件本就走「profile 条目 `Config`」路线（0.1.x 的 `installSection` 只在能力存在时才调用）。
+
+peer 依赖声明为 `^0.2.0-rc.1`：核心用 `semver.satisfies(runtimeVersion, range, { includePrerelease: true })` 判定，`0.2.1-rc.5` **满足**该范围，不会被判成不兼容；本插件不声明 `engines.dsh`（只声明 `engines.node >= 20`）。
+
 ## 已知行为与限制
 
 - **热生效范围**：改 patch 会触发 DSH 的配置热重载（核心同时监视 profile patch 与 home patch）。面板文案不会承诺「进程已重启」——`restart` 的实际语义是「重写该条目块以触发重应用」，真实重启延迟未在本机实测。

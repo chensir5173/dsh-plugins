@@ -24,7 +24,25 @@ const core = await import(pathToFileURL(path.join(HERE, '..', 'src', 'host-core.
 
 const API_PATH = '/__dsh-mcp-manager/api'
 const PLUGIN_HEADER = 'dsh-mcp-manager'
-const FAKE_TOOLS_MODULE = { defineTool: (options) => ({ ...options }) }
+/**
+ * 假的 `@deepseek-ai/dsh-tools`：**必须模仿真实 defineTool 的定义期契约**。
+ * 0.2.x（含 0.2.1-rc.5）的 defineTool 第一段就读 `options.output.render` / `options.output.schema`，
+ * 留一个只会 `{ ...options }` 的空壳会让「漏传 output」这类兼容性 bug 静默全绿 ——
+ * 而在真实宿主里那是 4 个模型工具全部注册失败（toolsRegistered: []）。
+ */
+const FAKE_TOOLS_MODULE = {
+  defineTool: (options) => {
+    const output = options && options.output
+    if (!output || typeof output !== 'object') throw new TypeError(`defineTool(${options && options.name}): output is required`)
+    if (!output.schema || typeof output.schema !== 'object') throw new TypeError(`defineTool(${options.name}): output.schema is required`)
+    if (typeof output.render !== 'function') throw new TypeError(`defineTool(${options.name}): output.render must be a function`)
+    const rendered = output.render({}, 'probe')
+    if (!Array.isArray(rendered) || rendered[0] === undefined || rendered[0].type !== 'text' || typeof rendered[0].text !== 'string') {
+      throw new TypeError(`defineTool(${options.name}): output.render must return text ContentBlock[]`)
+    }
+    return { ...options }
+  },
+}
 
 // ═══════════════════════════════ 夹具 ═══════════════════════════════
 
@@ -1068,6 +1086,12 @@ test('A8.4 4 个模型工具注册成功且与 HTTP 端点等价', withTemp(asyn
   const names = host.tools.registered.map((d) => d.name).sort()
   assert.deepEqual(names, ['mcp_manager_add', 'mcp_manager_list', 'mcp_manager_restart', 'mcp_manager_set_enabled'])
   assert.deepEqual(HOST.__diag().toolsRegistered.sort(), names)
+  // output 契约：execute 返回 JSON 文本 ⇒ schema 必须是 string，render 必须给出 text 块
+  for (const def of host.tools.registered) {
+    assert.deepEqual(def.output.schema, { type: 'string' }, `${def.name} output.schema`)
+    const blocks = def.output.render({}, '{"ok":true}')
+    assert.deepEqual(blocks, [{ type: 'text', text: '{"ok":true}' }], `${def.name} output.render`)
+  }
 
   const byName = (n) => host.tools.registered.find((d) => d.name === n)
   const listRes = JSON.parse(await byName('mcp_manager_list').execute({}))
@@ -1091,6 +1115,47 @@ test('A8.4 4 个模型工具注册成功且与 HTTP 端点等价', withTemp(asyn
   assert.equal(badRes.ok, false)
   assert.equal(badRes.error.code, 'not-found')
 }))
+
+// ═══════════ A2.5 DSH 空 patch 模板（顶层 []）不再让面板只读降级 ═══════════
+
+test('A2.5 顶层 [] 空模板：patchInfo 判 ok（不锁面板）、新增能落到该 profile 且写出合法 YAML', async (t) => {
+  // DSH 新建 profile 时生成的空模板；早期版本这里被判成 E_NOT_SEQUENCE → 整个面板只读降级。
+  const EMPTY_TEMPLATE = '# DSH 补丁层：profile tui（由 dsh 新建）\n# 本文件由 dsh 维护\n# 除非你清楚在做什么，否则不要手动编辑\n[]\n'
+  const env = mkFixture({ profileTexts: { tui: EMPTY_TEMPLATE } })
+  t.after(() => env.cleanup())
+  const host = await setupHost({ env })
+  assert.equal(read(env.patch('tui')), EMPTY_TEMPLATE)
+
+  const listed = await host.call('list')
+  assert.equal(listed.json.ok, true, JSON.stringify(listed.json))
+  const tuiInfo = listed.json.data.patchInfo.profiles.tui
+  assert.equal(tuiInfo.ok, true, JSON.stringify(tuiInfo))          // 修复前 false → 客户端 locked
+  assert.equal(tuiInfo.error, null, JSON.stringify(tuiInfo))
+  assert.deepEqual(listed.json.data.patchInfo.profiles.tui.entries, [])
+
+  const added = await host.call('add', {
+    serverName: 'TuiOnly',
+    config: { transport: 'stdio', command: 'node' },
+    profiles: ['tui'],
+  })
+  assert.equal(added.json.ok, true, JSON.stringify(added.json))
+
+  const text = read(env.patch('tui'))
+  assert.ok(!/^[ \t]*\[\s*\][ \t]*$/m.test(text), `[] 必须被摘掉：\n${text}`)
+  const parsed = core.parsePatch(text)
+  assert.equal(parsed.ok, true, JSON.stringify(parsed.error))
+  assert.deepEqual(parsed.entries.map((x) => x.id), ['mcp-TuiOnly'])
+  // 注释逐字保留；其它 profile 未被波及
+  assert.ok(text.startsWith('# DSH 补丁层：profile tui（由 dsh 新建）\n# 本文件由 dsh 维护\n# 除非你清楚在做什么，否则不要手动编辑\n'))
+  assert.ok(!read(env.patch('desktop')).includes('mcp-TuiOnly'))
+  assert.ok(!read(env.patch('web')).includes('mcp-TuiOnly'))
+  assert.ok(!read(env.homePatch).includes('mcp-TuiOnly'))
+
+  // 再删掉它：回到 0 条目，仍然合法（不会把 [] 写回去）
+  const removed = await host.call('remove', { id: 'mcp-TuiOnly' })
+  assert.equal(removed.json.ok, true, JSON.stringify(removed.json))
+  assert.equal(core.parsePatch(read(env.patch('tui'))).entries.length, 0)
+})
 
 // ═══════════════════════ A9 互不干扰与路由重复注册 ═══════════════════════
 
