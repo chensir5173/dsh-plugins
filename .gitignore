@@ -15,7 +15,27 @@ node_modules/
 # 临时稿 / 跨工作区交接稿（自包含文档，不随本仓库入库）
 tmp/
 
+# 插件测试用 mkdtemp 落下的临时 home/现场目录（bundle.test.mjs 等）
+**/.tmp-*/
+
 # 插件示例里的「私有脚本」目录：放个人/内网接口的脚本，刻意不入库
-# （例：sub-plugins/dsh-idle-hook/examples/private/ 下的内网 notify 脚本）
+# （例：sub-plugins/dsh-notify-hub/examples/private/ 下的内网 notify 脚本）
 # 注意：带斜杠的规则锚定仓库根，所以这里用 **/ 前缀匹配任意深度
 **/examples/private/
+
+# --- 外部工具 / agent 产物（与插件源码无关，2026-11-12 统一收口） ---
+
+# GraphFlow（本机编排与上下文服务）：观察记录、图谱导出
+.graphflow/
+graphflow-out/
+
+# GraphFlow / Copilot 写入的 agent 指引，不是本仓库的文档
+GEMINI.md
+.claude/
+.github/copilot-instructions.md
+
+# git bundle 同步产物（整仓快照，体积大且可随时再生成）
+*.bundle
+
+# Windows 保留名误建的文件（MSYS bash 里 `> nul` 会真的建出 nul）
+nul

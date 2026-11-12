@@ -33,6 +33,7 @@ dsh plugin --profile web add D:/ChenSirDocument/Dsh-Projects/dsh-plugins
 | [`dsh-composer-provider-label`](sub-plugins/dsh-composer-provider-label/README.md) | 显示并切换实际打到的提供方、模型与推理档 | 输入框右侧模型标签 |
 | [`dsh-session-title-regenerate`](sub-plugins/dsh-session-title-regenerate/README.md) | 重新生成会话标题 | 会话头按钮 / 侧栏 `⋯` / `/regenerate-title` |
 | [`dsh-session-time-bucket`](sub-plugins/dsh-session-time-bucket/README.md) | 侧栏会话按时间分组 | 自动（无按钮） |
+| [`dsh-sidebar-footer-stack`](sub-plugins/dsh-sidebar-footer-stack/README.md) | 侧栏左下角多个插件条目从横排改成竖排（不依赖皮肤） | 自动（无按钮），启用后重启一次 `dsh web` |
 | [`dsh-notify-hub`](sub-plugins/dsh-notify-hub/README.md) | 模型不在运行时（一轮结束 / 等待批准 / 等待回答）把通知投递到**本机脚本**或**你自己的邮箱**（内置 SMTP，授权码登录；页面关着也生效） | 设置 → 本地插件 → 「通知中心」 |
 | ~~[`dsh-open-session-workdir`](sub-plugins/dsh-open-session-workdir/README.md)~~ **已退役** | ~~用系统文件管理器打开会话工作目录~~ | 核心已自带「Open In…」分体按钮；源码保留，面板不再列出（见该插件 README 顶部） |
 

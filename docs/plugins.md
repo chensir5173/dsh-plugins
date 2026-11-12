@@ -32,6 +32,7 @@ dsh plugin --profile web add <本机仓库根>                                  
 | [`dsh-terminal-font`](../sub-plugins/dsh-terminal-font/README.md) | 把本机已装的 **Nerd Font** 接进侧边栏终端字体栈（`@font-face` + `size-adjust` 归一），修掉 oh-my-posh 提示符的豆腐块 | 自动：样式进页面 `<head>`；设置 →「本地插件」→ tab「终端字体」看诊断 / 改字体 | 客户端 + 空壳宿主（注入样式） | 本机需装 `0xProto Nerd Font (Mono)` 与 `Sarasa Term SC Nerd`；**桌面版须重启 DSH Desktop** |
 | [`dsh-mcp-manager`](../sub-plugins/dsh-mcp-manager/README.md) | 管 `@deepseek-ai/dsh-mcp-client` 条目：列表 / 新增 / 编辑 / 删除 / 启停 / **按 profile 的生效矩阵** / 全局默认参数 / 一键迁移旧标记；**不要求重启** | 设置 →「本地插件」→ tab「MCP 服务器」 | 宿主 + 客户端 | 定义写在 `$DSH_HOME/cordis.patch.yml`（全员）或所选 profile 的 `cordis.patch.yml`（部分）；需 `webServer` 提供 API（缺席即只读降级） |
 | [`dsh-model-alpha-sort`](../sub-plugins/dsh-model-alpha-sort/README.md) | 把「设置 → 模型」里每个提供方的模型目录按**显示名首字母**重排；设置页、composer 选择器与 `/model` 弹窗同序 | 设置 →「模型」页底部卡片；启动时自动跑一次 | 客户端 + 宿主半 | 需 `settingsController`（写模型数组）与 `llm.listConfigurableProviders()`；`webServer` 缺席只影响卡片按钮 |
+| [`dsh-sidebar-footer-stack`](../sub-plugins/dsh-sidebar-footer-stack/README.md) | 把侧栏左下角 `sidebar.footer.action` 里注册的多个插件条目从**横排改成竖排**（修核心只写 `display:flex`、没写 `flex-direction` 的默认 row），不依赖皮肤 | 自动：样式注入页面 `<head>`；没有设置页、没有 tab | 宿主半（注入 CSS）+ 零 UI 客户端半 | 需核心 `webserver/index-inject` 事件；**首次启用后必须重启一次 `dsh web`**，桌面版重启 DSH Desktop |
 
 ## 逐个怎么说"怎么用"
 
@@ -187,6 +188,19 @@ dsh plugin --profile web add <本机仓库根>                                  
 - **诊断**：`GET /__dsh-model-alpha-sort/status`（统计 / 逐提供方状态 / 启动状态 / 端点状态）、`POST /__dsh-model-alpha-sort/sort`；两端点都要求 `x-dsh-plugin: dsh-model-alpha-sort` 头 + 同源，否则 403。
 - **注意**：只改数组顺序，不改模型字段，也不改默认模型（默认模型按 id 记录）。
 
+### dsh-sidebar-footer-stack — 侧栏 footer 竖排
+
+- **入口**：没有 UI。启用后宿主半往页面 `<head>` 注入一条样式，侧栏左下角立刻变成「一个条目一行」；管理器面板里只有一个开关。
+- **它补的是哪个缺口**：核心包 `@deepseek-ai/dsh-client-ui-sidebar` 的 `_footArea` 层是 column 容器，但它的子节点 `_footerActions`（槽位 `sidebar.footer.action`，`kind:"list"`）只声明了 `display:flex`、**没有 `flex-direction`** ⇒ 默认 row。于是注册进这个槽位的插件（远程桥、用量/账单……）被塞进同一条 264px 横排：标签截断成 `Re...`，用量卡片掉进它自己的 `@container (width<=210px)` 降级形态。核心没有 Config 开关能改方向，皮肤也只改颜色变量（`--dsw-alias-*`），所以只能由插件补一条规则。
+- **两层都必须竖排**：list 槽位只渲染 **1 个包装层**，真正的插件条目是它的子元素（`footerActions > wrapper > entry…`）。只把 `footerActions` 改成 column 不够 —— 必须同时把包装层也改成 column + `width:100%`，否则条目在包装层内部继续横排，第二个条目被顶到侧边栏外。
+- **两条护栏**：① **只有一个条目时保持横向** —— 判据是 `footerActions:not(:has(> * + *)):not(:has(> * > * + *))`（直接子元素 ≤1 **且** 没有任何直接子元素内部存在兄弟对）。少了第二个 `:not(:has())`，单包装层的常规结构会被误判成「单条」，回退的 row 规则会把竖排覆盖回去（v0.1.0 的真实事故）。② **折叠成窄轨时还原核心布局** —— 用祖先类 `[class*="_collapsed"]` 显式改回居中横排，规则特异性 (0,3,0) 高于其它 (0,2,0) 规则且排在最后。
+- **类名怎么选**：类名是 CSS module hash（`hHd-Xa_footerActions`），前缀随 DSH 版本变、后缀稳定，DOM 上也没有 `data-*` 锚点 ⇒ 用属性子串匹配 `[class*="_footArea"]` / `[class*="_footerActions"]`。
+- **配置**（命名空间 = 条目 id）：`enabled`（默认 true；false 时完全不注册监听、不注入 CSS）、`gap`（默认 4，0–24 px）、`stackSingle`（默认 false；true 时连只有一个条目也竖排，即关掉护栏 ①）。v0.1.0 的 `minWidth` 已删除，现在写它会被忽略。
+- **生效时机**：新 entry 只在 DSH boot 时读 profile `cordis.patch.yml` ⇒ 首次启用**必须重启一次 `dsh web`**；之后改 `gap` / `stackSingle` 只需刷新页面（web 每次请求重新收集注入表）。DSH Desktop 只在 app-ready 收集一次，改配置也要重启。
+- **诊断**：浏览器控制台 `window.__dshSidebarFooterStack.report()` 给一句中文结论；`.snapshot()` 给 `{installed, hasFootArea, hasFooterActions, count, entries, flexDirection, width, stacked, single}`（`count` 是**穿透包装层**后的真实条目数）。
+- **端点**：无。**不注册任何槽位，也不占用任何 order 值**；`inject = []`（纯 cordis 事件，不依赖注入服务）。
+- **已知限制**：假设上游继续用 `_footArea` / `_footerActions` 这两个模块名、且「槽位 → wrapper → 条目」只有一层；上游若改结构，诊断会先显示 `hasFooterActions:false` 或 `count` 失真。只管 `sidebar.footer.action`，`sidebar.settings`（`kind:"single"`，如用量卡片所在的另一行）本来就不受影响。
+
 ## UI 触点分布（核对过的槽位与 order）
 
 同一槽位内按 `order` 升序排列；不同插件的 order **互不相同**，所以启用任意组合都不会互相遮蔽。
@@ -202,6 +216,7 @@ dsh plugin --profile web add <本机仓库根>                                  
 | 斜杠命令 | `/rewind`（客户端 `commandUi` 贡献）· `/regenerate-title`（宿主命令） |
 | 侧栏会话行 `⋯` 菜单 | `dsh-session-title-regenerate`（DOM 注入，核心无插件槽） |
 | 侧栏会话列表 | `dsh-session-time-bucket`（就地注入组头 + `[工作区]` 前缀，非槽位） |
+| 侧栏左下角 `sidebar.footer.action`（核心 list 槽） | `dsh-sidebar-footer-stack`（**不注册槽位**，只经 `webserver/index-inject` 注入一条样式把该槽的条目改成竖排；因此不占用任何 order 值） |
 | 宿主 HTTP | `/__dsh-plugin-manager/{status,list,set-enabled,set-all-enabled,remove,migrate}` · `/__esc-rewind/{status,session/delete}` · `/__notify-hub/{status,presence,history,clear-history,test-run,test-email,reset-rule}` · `/__dsh-agent-presets/{state,file,set-enabled,create,save,remove,import,migrate}` · `/__dsh-mcp-manager/api`（单入口 `{action,payload}`，需 `x-dsh-plugin: dsh-mcp-manager` 头） · `/__dsh-model-alpha-sort/{status,sort}`（需 `x-dsh-plugin: dsh-model-alpha-sort` 头 + 同源） |
 
 > `/__hindsight-model/*` 与「本地插件」页里的 `hindsight-model` tab 随 2026-10-09 退役一并消失（源码保留在仓库）。
