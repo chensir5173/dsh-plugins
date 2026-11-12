@@ -28,12 +28,16 @@ dsh plugin --profile web add D:/ChenSirDocument/Dsh-Projects/dsh-plugins
 | 插件 | 作用 | 在哪儿用 |
 |---|---|---|
 | [`dsh-plugin-manager`](dsh-plugin-manager/README.md) | 管理本仓库全部子插件（先装这一个） | 设置 → 本地插件 |
+| [`dsh-agent-preset-manager`](sub-plugins/dsh-agent-preset-manager/README.md) | 让本地目录里的 agent preset 在 0.2.0 上继续可用（运行期声明，不改 profile 清单） | 设置 → 本地插件 → 「Agent 预设」 |
+| [`dsh-mcp-manager`](sub-plugins/dsh-mcp-manager/README.md) | 管理 MCP 服务器：增删改启停、按 profile 的生效矩阵、全局默认参数、一键迁移 | 设置 → 本地插件 → 「MCP 服务器」 |
 | [`dsh-composer-history-recall`](sub-plugins/dsh-composer-history-recall/README.md) | 逐条召回本会话你发过的消息填回草稿（绝不自动发送） | 草稿首行按 `↑` / `↓` |
 | [`dsh-esc-rewind`](sub-plugins/dsh-esc-rewind/README.md) | 停止本轮 / 回退到任意一轮重来 | `Esc`、`Esc Esc`、`/rewind`、会话头图标 |
 | [`dsh-composer-provider-label`](sub-plugins/dsh-composer-provider-label/README.md) | 显示并切换实际打到的提供方、模型与推理档 | 输入框右侧模型标签 |
 | [`dsh-session-title-regenerate`](sub-plugins/dsh-session-title-regenerate/README.md) | 重新生成会话标题 | 会话头按钮 / 侧栏 `⋯` / `/regenerate-title` |
 | [`dsh-session-time-bucket`](sub-plugins/dsh-session-time-bucket/README.md) | 侧栏会话按时间分组 | 自动（无按钮） |
+| [`dsh-model-alpha-sort`](sub-plugins/dsh-model-alpha-sort/README.md) | 把每个提供方的模型目录按显示名重排（设置页 / composer 选择器 / `/model` 弹窗同序） | 设置 → 模型 → 页面底部「模型排序」卡片；启用后启动自动跑一次 |
 | [`dsh-sidebar-footer-stack`](sub-plugins/dsh-sidebar-footer-stack/README.md) | 侧栏左下角多个插件条目从横排改成竖排（不依赖皮肤） | 自动（无按钮），启用后重启一次 `dsh web` |
+| [`dsh-terminal-font`](sub-plugins/dsh-terminal-font/README.md) | 把本机已装的 Nerd Font 接进侧边栏终端字体栈（`@font-face` + `size-adjust` 归一），修 oh-my-posh 提示符的豆腐块 | 自动注入（需本机已装 Nerd Font，否则回退 Consolas）；设置 → 本地插件 → 「终端字体」看诊断 |
 | [`dsh-notify-hub`](sub-plugins/dsh-notify-hub/README.md) | 模型不在运行时（一轮结束 / 等待批准 / 等待回答）把通知投递到**本机脚本**或**你自己的邮箱**（内置 SMTP，授权码登录；页面关着也生效） | 设置 → 本地插件 → 「通知中心」 |
 | ~~[`dsh-open-session-workdir`](sub-plugins/dsh-open-session-workdir/README.md)~~ **已退役** | ~~用系统文件管理器打开会话工作目录~~ | 核心已自带「Open In…」分体按钮；源码保留，面板不再列出（见该插件 README 顶部） |
 
