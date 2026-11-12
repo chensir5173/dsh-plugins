@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# dsh-idle-hook 示例：macOS 本地提醒（提示音 + 原生桌面通知）
+# dsh-notify-hub 示例：macOS 本地提醒（提示音 + 原生桌面通知）
 #
 # 契约（插件传给你的东西，别额外假设）：
 #   stdin : 一行 UTF-8 JSON
 #           {"sessionId","sessionTitle","cwd","reason","reasonDetail","triggeredAt","ruleId","ruleName"}
-#   环境变量: IDLE_HOOK_SESSION_ID / IDLE_HOOK_RULE_ID / IDLE_HOOK_CWD
-#             / IDLE_HOOK_REASON / IDLE_HOOK_DETAIL / IDLE_HOOK_TIME
+#   环境变量: NOTIFY_HUB_SESSION_ID / NOTIFY_HUB_RULE_ID / NOTIFY_HUB_CWD
+#             / NOTIFY_HUB_REASON / NOTIFY_HUB_DETAIL / NOTIFY_HUB_TIME
 #   cwd   : 插件已切到「规则的工作目录」，相对路径可以直接用
 #   超时  : 默认 30 秒，超时会被插件杀掉 —— 本脚本没有任何阻塞等待
 #
 # 可选调参（都有默认值）：
-#   IDLE_HOOK_TITLE         覆盖通知标题（notify-router.py 会用到）
-#   IDLE_HOOK_SOUND         提示音文件，默认 /System/Library/Sounds/Glass.aiff
-#   IDLE_HOOK_SOUND_REPEAT  响几声，默认：等待批准 3 / 等待回答 2 / 一轮结束 1；0 = 静音
-#   IDLE_HOOK_DRY_RUN=1     只打印将要发的提醒，不响也不弹（自测用）
+#   NOTIFY_HUB_TITLE         覆盖通知标题（notify-router.py 会用到）
+#   NOTIFY_HUB_SOUND         提示音文件，默认 /System/Library/Sounds/Glass.aiff
+#   NOTIFY_HUB_SOUND_REPEAT  响几声，默认：等待批准 3 / 等待回答 2 / 一轮结束 1；0 = 静音
+#   NOTIFY_HUB_DRY_RUN=1     只打印将要发的提醒，不响也不弹（自测用）
 #
 # 依赖：bash / afplay / osascript，都是 macOS 自带。
 
@@ -47,11 +47,11 @@ print("" if v is None else v)' "$1" 2>/dev/null && return 0
 SESSION_TITLE="$(json_field sessionTitle)"
 SESSION_TITLE="${SESSION_TITLE:-未命名会话}"
 REASON="$(json_field reason)"
-REASON="${REASON:-${IDLE_HOOK_REASON:-turn-end}}"
+REASON="${REASON:-${NOTIFY_HUB_REASON:-turn-end}}"
 DETAIL="$(json_field reasonDetail)"
-DETAIL="${DETAIL:-${IDLE_HOOK_DETAIL:-}}"
+DETAIL="${DETAIL:-${NOTIFY_HUB_DETAIL:-}}"
 WORKDIR="$(json_field cwd)"
-WORKDIR="${WORKDIR:-${IDLE_HOOK_CWD:-$(pwd)}}"
+WORKDIR="${WORKDIR:-${NOTIFY_HUB_CWD:-$(pwd)}}"
 
 # ---------- 3. 按「为什么停下来」组织文案 ----------
 TITLE_BASE="DSH 停下来了"
@@ -85,15 +85,15 @@ case "$REASON" in
     ;;
 esac
 
-TITLE="${IDLE_HOOK_TITLE:-$TITLE}"
-SOUND="${IDLE_HOOK_SOUND:-/System/Library/Sounds/Glass.aiff}"
+TITLE="${NOTIFY_HUB_TITLE:-$TITLE}"
+SOUND="${NOTIFY_HUB_SOUND:-/System/Library/Sounds/Glass.aiff}"
 case "$SOUND" in
   */*) ;;                                             # 已经是完整路径
   *) SOUND="/System/Library/Sounds/$SOUND" ;;         # 只写 Glass.aiff 时补全到系统音目录
 esac
 if [ ! -f "$SOUND" ] && [ -f "$SOUND.aiff" ]; then SOUND="$SOUND.aiff"; fi   # 允许省略 .aiff
 
-REPEAT="${IDLE_HOOK_SOUND_REPEAT:-$DEFAULT_REPEAT}"
+REPEAT="${NOTIFY_HUB_SOUND_REPEAT:-$DEFAULT_REPEAT}"
 case "$REPEAT" in ''|*[!0-9]*) REPEAT=1 ;; esac
 if [ "$REPEAT" -gt 5 ]; then REPEAT=5; fi   # 别把 30 秒超时耗光
 
@@ -103,7 +103,7 @@ $REASON_TEXT
 $WORKDIR"                                               # 多行版，给通知正文
 
 # ---------- 4. 试跑模式：只打印，不响也不弹 ----------
-if [ "${IDLE_HOOK_DRY_RUN:-0}" != "0" ] || [ "${1:-}" = "--dry-run" ]; then
+if [ "${NOTIFY_HUB_DRY_RUN:-0}" != "0" ] || [ "${1:-}" = "--dry-run" ]; then
   echo "[notify-macos] DRY-RUN 标题=$TITLE 正文=$BODY_PLAIN 声音=$SOUND 次数=$REPEAT"
   exit 0
 fi

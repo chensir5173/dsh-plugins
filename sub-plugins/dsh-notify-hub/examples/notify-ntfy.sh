@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# dsh-idle-hook 示例：推送到 ntfy（手机装 ntfy App 订阅主题就能收，或自建服务）
+# dsh-notify-hub 示例：推送到 ntfy（手机装 ntfy App 订阅主题就能收，或自建服务）
 #
 # 契约（插件传给你的东西，别额外假设）：
 #   stdin : 一行 UTF-8 JSON
 #           {"sessionId","sessionTitle","cwd","reason","reasonDetail","triggeredAt","ruleId","ruleName"}
-#   环境变量: IDLE_HOOK_SESSION_ID / IDLE_HOOK_RULE_ID / IDLE_HOOK_CWD
-#             / IDLE_HOOK_REASON / IDLE_HOOK_DETAIL / IDLE_HOOK_TIME
+#   环境变量: NOTIFY_HUB_SESSION_ID / NOTIFY_HUB_RULE_ID / NOTIFY_HUB_CWD
+#             / NOTIFY_HUB_REASON / NOTIFY_HUB_DETAIL / NOTIFY_HUB_TIME
 #   cwd   : 插件已切到「规则的工作目录」，相对路径可以直接用
 #   超时  : 默认 30 秒会杀掉脚本 —— 本脚本 curl --max-time 5，不阻塞
 #
@@ -15,7 +15,7 @@
 #   NTFY_TOKEN     需要鉴权时填，会带 Authorization: Bearer
 #   NTFY_PRIORITY  优先级 1..5（默认按原因：等待批准/等待回答/报错=4，其余=3）
 #   NTFY_TAGS      标签，逗号分隔（默认按原因给 warning / question / white_check_mark）
-#   IDLE_HOOK_TITLE 覆盖标题
+#   NOTIFY_HUB_TITLE 覆盖标题
 #
 # 用法：
 #   echo '{"sessionTitle":"修 bug","reason":"approval"}' | ./notify-ntfy.sh
@@ -67,13 +67,13 @@ print("" if v is None else v)' "$1" 2>/dev/null && return 0
 SESSION_TITLE="$(json_field sessionTitle)"
 SESSION_TITLE="${SESSION_TITLE:-未命名会话}"
 REASON="$(json_field reason)"
-REASON="${REASON:-${IDLE_HOOK_REASON:-turn-end}}"
+REASON="${REASON:-${NOTIFY_HUB_REASON:-turn-end}}"
 DETAIL="$(json_field reasonDetail)"
-DETAIL="${DETAIL:-${IDLE_HOOK_DETAIL:-}}"
+DETAIL="${DETAIL:-${NOTIFY_HUB_DETAIL:-}}"
 WORKDIR="$(json_field cwd)"
-WORKDIR="${WORKDIR:-${IDLE_HOOK_CWD:-$(pwd)}}"
+WORKDIR="${WORKDIR:-${NOTIFY_HUB_CWD:-$(pwd)}}"
 WHEN="$(json_field triggeredAt)"
-WHEN="${WHEN:-${IDLE_HOOK_TIME:-}}"
+WHEN="${WHEN:-${NOTIFY_HUB_TIME:-}}"
 
 # ---------- 3. 文案与优先级 ----------
 TITLE_BASE="DSH 停下来了"
@@ -102,7 +102,7 @@ case "$REASON" in
     ;;
 esac
 
-TITLE="${IDLE_HOOK_TITLE:-$TITLE}"
+TITLE="${NOTIFY_HUB_TITLE:-$TITLE}"
 TOPIC="${NTFY_TOPIC:-${TOPIC_ARG:-your_topic}}"
 BASE="${NTFY_BASE:-https://ntfy.sh}"
 PRIORITY="${NTFY_PRIORITY:-$DEFAULT_PRIORITY}"

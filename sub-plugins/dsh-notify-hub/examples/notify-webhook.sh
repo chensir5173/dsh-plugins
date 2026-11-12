@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# dsh-idle-hook 示例：一个脚本覆盖常见聊天机器人 webhook
+# dsh-notify-hub 示例：一个脚本覆盖常见聊天机器人 webhook
 #   feishu  飞书自定义机器人      wecom   企业微信群机器人
 #   dingtalk 钉钉自定义机器人     telegram  Telegram Bot
 #   slack   Slack Incoming Webhook
@@ -7,8 +7,8 @@
 # 契约（插件传给你的东西，别额外假设）：
 #   stdin : 一行 UTF-8 JSON
 #           {"sessionId","sessionTitle","cwd","reason","reasonDetail","triggeredAt","ruleId","ruleName"}
-#   环境变量: IDLE_HOOK_SESSION_ID / IDLE_HOOK_RULE_ID / IDLE_HOOK_CWD
-#             / IDLE_HOOK_REASON / IDLE_HOOK_DETAIL / IDLE_HOOK_TIME
+#   环境变量: NOTIFY_HUB_SESSION_ID / NOTIFY_HUB_RULE_ID / NOTIFY_HUB_CWD
+#             / NOTIFY_HUB_REASON / NOTIFY_HUB_DETAIL / NOTIFY_HUB_TIME
 #   cwd   : 插件已切到「规则的工作目录」，相对路径可以直接用
 #   超时  : 默认 30 秒会杀掉脚本 —— 本脚本 curl --max-time 5，不阻塞
 #
@@ -18,7 +18,7 @@
 #                   也可以分别用 FEISHU_WEBHOOK_URL / WECOM_WEBHOOK_URL /
 #                   DINGTALK_WEBHOOK_URL / SLACK_WEBHOOK_URL 覆盖
 #   TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID   telegram 用这两个拼地址
-#   IDLE_HOOK_TITLE 覆盖标题
+#   NOTIFY_HUB_TITLE 覆盖标题
 #
 # 用法：
 #   echo '{"sessionTitle":"修 bug","reason":"approval"}' | WEBHOOK_KIND=wecom WEBHOOK_URL=... ./notify-webhook.sh
@@ -70,13 +70,13 @@ print("" if v is None else v)' "$1" 2>/dev/null && return 0
 SESSION_TITLE="$(json_field sessionTitle)"
 SESSION_TITLE="${SESSION_TITLE:-未命名会话}"
 REASON="$(json_field reason)"
-REASON="${REASON:-${IDLE_HOOK_REASON:-turn-end}}"
+REASON="${REASON:-${NOTIFY_HUB_REASON:-turn-end}}"
 DETAIL="$(json_field reasonDetail)"
-DETAIL="${DETAIL:-${IDLE_HOOK_DETAIL:-}}"
+DETAIL="${DETAIL:-${NOTIFY_HUB_DETAIL:-}}"
 WORKDIR="$(json_field cwd)"
-WORKDIR="${WORKDIR:-${IDLE_HOOK_CWD:-$(pwd)}}"
+WORKDIR="${WORKDIR:-${NOTIFY_HUB_CWD:-$(pwd)}}"
 WHEN="$(json_field triggeredAt)"
-WHEN="${WHEN:-${IDLE_HOOK_TIME:-}}"
+WHEN="${WHEN:-${NOTIFY_HUB_TIME:-}}"
 
 # ---------- 3. 文案 ----------
 TITLE_BASE="DSH 停下来了"
@@ -96,7 +96,7 @@ case "$REASON" in
     ;;
   *) TITLE="$TITLE_BASE"; REASON_TEXT="触发原因：$REASON" ;;
 esac
-TITLE="${IDLE_HOOK_TITLE:-$TITLE}"
+TITLE="${NOTIFY_HUB_TITLE:-$TITLE}"
 
 TEXT="$TITLE
 会话：$SESSION_TITLE

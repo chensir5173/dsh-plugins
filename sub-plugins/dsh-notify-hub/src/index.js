@@ -1,4 +1,4 @@
-// dsh-idle-hook: HOST half — the part that runs whether or not a page is open.
+// dsh-notify-hub: HOST half — the part that runs whether or not a page is open.
 //
 // Responsibilities:
 //   · trigger 1 — a turn really ended (session/event 'turn/end', one per turn,
@@ -12,12 +12,13 @@
 //     connected client) and the script is fired without awaiting, while next()'s
 //     result is returned unchanged — otherwise the approval chain would end up
 //     fail-closed 'unavailable'.
-//   · run the rule's script (node:child_process.spawn, argv array, no shell by
-//     default) with the context on stdin as UTF-8 JSON plus ASCII-safe env
-//     mirrors, a kill timeout, one instance per rule at a time, debounce, and
-//     consecutive-failure auto-disable.
-//   · /__idle-hook/* HTTP surface for the client half (status, presence
-//     heartbeat, history, test-run, reset-rule).
+//   · deliver a rule's notification — either run its script
+//     (node:child_process.spawn, argv array, no shell by default) with the
+//     context on stdin as UTF-8 JSON plus ASCII-safe env mirrors, or send one
+//     email through the built-in SMTP client — with a kill/timeout, one instance
+//     per rule at a time, debounce, and consecutive-failure auto-disable.
+//   · /__notify-hub/* HTTP surface for the client half (status, presence
+//     heartbeat, history, test-run, test-email, reset-rule).
 //
 // Hard rule: NO @deepseek-ai/* import here (link: bundles cannot resolve host
 // packages from this repo — docs/knowledge/2026-09-09-plugin-host-half-no-core-import.md).
@@ -29,8 +30,9 @@ import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import * as core from './host-core.js'
+import * as smtp from './smtp.js'
 
-const name = 'dsh-idle-hook'
+const name = 'dsh-notify-hub'
 /** No hard host dependencies: every service is reached lazily. */
 const inject = []
 
@@ -77,16 +79,32 @@ function serviceOf(key) {
 // --- host-owned state file (history + per-rule runtime counters) -------------
 
 function loadState() {
-  const file = core.historyPathOf(core.dshHome())
+  const home = core.dshHome()
+  const file = core.historyPathOf(home)
   STATE.stateFile = file
   let raw = null
   try { raw = fs.readFileSync(file, 'utf8') } catch { raw = null }
+  let migratedFrom = null
+  if (!raw) {
+    // One-time migration: the pre-rename plugin wrote idle-hook-history.json.
+    // Read it, then persist under the new name on the first save. The old file
+    // is left in place so a downgrade keeps working.
+    const legacy = path.join(home, core.LEGACY_HISTORY_FILE_NAME)
+    try {
+      const legacyRaw = fs.readFileSync(legacy, 'utf8')
+      if (legacyRaw) { raw = legacyRaw; migratedFrom = legacy }
+    } catch { /* nothing to migrate */ }
+  }
   if (!raw) return
   let parsed = null
   try { parsed = JSON.parse(raw) } catch { parsed = null }
   const next = core.normalizeState(parsed)
   STATE.runtime = next.runtime
   STATE.history = next.entries
+  if (migratedFrom) {
+    STATE.lastError = null
+    persistState()
+  }
 }
 
 function persistState() {
@@ -310,10 +328,7 @@ async function runRule(rule, opts = {}) {
     now: startedAt,
   })
   const values = core.placeholderValues(built.payload, rule)
-  const plan = core.buildCommand(rule, values, { home: os.homedir() })
-  if (!plan.ok) return finish(rule, opts, { status: 'error', error: plan.error, startedAt, durationMs: 0 })
-  const cwd = rule.cwd ? core.expandTilde(rule.cwd, os.homedir()) : (opts.cwd || process.cwd())
-  // inherited env → global env → this rule's env → the IDLE_HOOK_* trigger contract
+  // inherited env → global env → this rule's env → the NOTIFY_HUB_* trigger contract
   const env = core.mergeEnv(
     process.env,
     opts.globalEnv,
@@ -325,9 +340,35 @@ async function runRule(rule, opts = {}) {
     Object.keys(core.normalizeEnv(opts.globalEnv)).concat(Object.keys(core.normalizeEnv(rule.env))),
   )).sort()
   STATE.lastError = null
+
+  if (rule.channel === core.CHANNEL.email) {
+    // 邮件通道不派生任何进程：地址不全就直接记 error，连 socket 都不开。
+    const message = core.buildMailMessage(rule.email, values, startedAt)
+    let result
+    if (!message.ok) {
+      result = { status: 'error', error: message.error, durationMs: 0 }
+    } else {
+      const delivery = await smtp.sendMail(rule.email, message, { env, timeoutMs: rule.timeoutMs })
+      result = {
+        status: delivery.ok ? 'ok' : (delivery.status || 'failed'),
+        error: delivery.ok ? null : (delivery.error || '邮件投递失败'),
+        durationMs: delivery.durationMs,
+        note: delivery.ok ? '已投递至 ' + message.to.join(', ') : null,
+      }
+    }
+    result.startedAt = startedAt
+    result.envKeys = envKeys
+    result.channel = core.CHANNEL.email
+    return finish(rule, opts, result)
+  }
+
+  const plan = core.buildCommand(rule, values, { home: os.homedir() })
+  if (!plan.ok) return finish(rule, opts, { status: 'error', error: plan.error, startedAt, durationMs: 0 })
+  const cwd = rule.cwd ? core.expandTilde(rule.cwd, os.homedir()) : (opts.cwd || process.cwd())
   const result = await spawnOnce(plan, { cwd, env, stdin: JSON.stringify(built.payload, null, 2), timeoutMs: rule.timeoutMs })
   result.startedAt = startedAt
   result.envKeys = envKeys
+  result.channel = core.CHANNEL.script
   // 「命令字段里混了解释器」这类被自动纠正的情况要跟着结果走，界面/历史才看得到
   result.note = plan.note || null
   return finish(rule, opts, result)
@@ -507,7 +548,7 @@ function entryConfigSchema() {
   schema.toJSON = () => JSON.parse(JSON.stringify(CONFIG_SCHEMA_JSON))
   schema['~standard'] = {
     version: 1,
-    vendor: 'dsh-idle-hook',
+    vendor: 'dsh-notify-hub',
     validate(value) {
       try { return { value: normalizeEntryConfig(value) } }
       catch (error) { return { issues: [{ message: (error && error.message) ? error.message : String(error) }] } }
@@ -658,6 +699,32 @@ function readBody(req) {
   })
 }
 
+/** Env used to answer "is a credential configured?" without revealing it. */
+function emailEnvFor(rule, cfg) {
+  return Object.assign(
+    {},
+    process.env,
+    core.normalizeEnv(cfg && cfg.env),
+    core.normalizeEnv(rule && rule.env),
+  )
+}
+
+/**
+ * Strip the authorization code before anything leaves the host half. The status
+ * endpoint and the client both work off this shape, so this is the only place
+ * that needs to remember the rule.
+ */
+function redactRule(rule, cfg) {
+  if (!rule || rule.channel !== core.CHANNEL.email) return rule
+  const email = rule.email || {}
+  return Object.assign({}, rule, {
+    email: Object.assign({}, email, {
+      pass: '',
+      passConfigured: core.hasEmailPass(email, emailEnvFor(rule, cfg)),
+    }),
+  })
+}
+
 function statusPayload() {
   ensureSettings()
   const cfg = currentConfig()
@@ -666,8 +733,14 @@ function statusPayload() {
     pluginDir: PLUGIN_DIR,
     platform: process.platform,
     settings: { ready: STATE.settingsReady, error: STATE.settingsError, namespace: core.SETTINGS_NS, source: STATE.settingsSource },
-    config: { enabled: cfg.enabled, seeded: cfg.seeded, env: cfg.env, rules: cfg.rules, count: cfg.rules.length },
-    sampleRule: core.sampleRule(PLUGIN_DIR, process.platform),
+    config: {
+      enabled: cfg.enabled,
+      seeded: cfg.seeded,
+      env: cfg.env,
+      rules: cfg.rules.map((rule) => redactRule(rule, cfg)),
+      count: cfg.rules.length,
+    },
+    sampleRule: redactRule(core.sampleRule(PLUGIN_DIR, process.platform), cfg),
     presence: core.presenceOf(STATE.presence),
     presenceIntervalMs: core.PRESENCE_INTERVAL_MS,
     runtime: STATE.runtime,
@@ -679,7 +752,11 @@ function statusPayload() {
     },
     lastError: STATE.lastError,
     // 快照而不是把内部对象交出去：调用方改到它就会改到插件状态
-    diag: Object.assign({}, STATE.diag, { lastDispatch: STATE.diag.lastDispatch ? Object.assign({}, STATE.diag.lastDispatch) : null }),
+    // inflight 也进快照：状态页能看到「正在执行」，测试也能等它清空再触发下一次
+    diag: Object.assign({}, STATE.diag, {
+      lastDispatch: STATE.diag.lastDispatch ? Object.assign({}, STATE.diag.lastDispatch) : null,
+      inflight: Array.from(STATE.inflight.keys()),
+    }),
   }
 }
 
@@ -726,9 +803,11 @@ function registerHttp(ctx, host) {
         sendJson(res, 200, { ok: true, data: { runtime: STATE.runtime } })
         return
       }
-      if (url === HTTP_PREFIX + '/test-run' && method === 'POST') {
+      if ((url === HTTP_PREFIX + '/test-run' || url === HTTP_PREFIX + '/test-email') && method === 'POST') {
         const body = await readBody(req)
         const rule = core.normalizeRule((body && body.rule) || {})
+        // 「发送测试邮件」永远走 SMTP 分支，草稿里的 channel 不参与判断。
+        if (url === HTTP_PREFIX + '/test-email') rule.channel = core.CHANNEL.email
         // the client sends its unsaved global env too, so test-run matches the form
         const globalEnv = core.normalizeEnv(body && body.env)
         const live = pickLiveSession()

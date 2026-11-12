@@ -1,8 +1,8 @@
-// Tests for dsh-idle-hook/src/host-core.js (pure logic) plus a real-process
+// Tests for dsh-notify-hub/src/host-core.js (pure logic) plus a real-process
 // check of the executor in src/index.js — including the parts I cannot verify by
 // hand on a Windows machine.
 //
-// Run: node sub-plugins/dsh-idle-hook/test/host-core.test.mjs
+// Run: node sub-plugins/dsh-notify-hub/test/host-core.test.mjs
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
@@ -27,9 +27,25 @@ function check(name, fn) {
   }
 }
 
+let skipped = 0
+
+// The DSH agent sandbox denies spawning *any* child process ("spawn EPERM"), so a
+// real executor run cannot happen inside this environment. The same test does run
+// for real on a plain terminal, so a sandbox rejection is reported as SKIP — never
+// as a silent pass, and never as a failure of the code under test.
+const SANDBOX_DENIED = /spawn EPERM|EPERM|EACCES/
+function sandboxDenied(result) {
+  return Boolean(result) && result.status === 'error' && SANDBOX_DENIED.test(String(result.error || ''))
+}
+
 async function checkAsync(name, fn) {
   try {
-    await fn()
+    const outcome = await fn()
+    if (outcome === 'sandbox-skip') {
+      skipped += 1
+      console.log('  SKIP ' + name + ' → 当前沙箱禁止派生子进程（spawn EPERM）；普通终端下会真正执行')
+      return
+    }
     passed += 1
     console.log('  ok   ' + name)
   } catch (e) {
@@ -239,11 +255,11 @@ check('context: env mirrors stay ASCII and never carry the title', () => {
     detail: null,
     now: 1700000000000,
   })
-  assert.equal(built.env.IDLE_HOOK_SESSION_ID, 'session-1')
-  assert.equal(built.env.IDLE_HOOK_REASON, 'approval')
-  assert.equal(built.env.IDLE_HOOK_CWD, '/proj/app')
-  assert.equal(built.env.IDLE_HOOK_RULE_ID, '???', 'a non-ASCII rule id is sanitised')
-  assert.equal(Object.prototype.hasOwnProperty.call(built.env, 'IDLE_HOOK_TITLE'), false)
+  assert.equal(built.env.NOTIFY_HUB_SESSION_ID, 'session-1')
+  assert.equal(built.env.NOTIFY_HUB_REASON, 'approval')
+  assert.equal(built.env.NOTIFY_HUB_CWD, '/proj/app')
+  assert.equal(built.env.NOTIFY_HUB_RULE_ID, '???', 'a non-ASCII rule id is sanitised')
+  assert.equal(Object.prototype.hasOwnProperty.call(built.env, 'NOTIFY_HUB_TITLE'), false)
   for (const key of Object.keys(built.env)) {
     for (const ch of String(built.env[key])) assert.ok(ch.charCodeAt(0) < 127, key + ' must stay ASCII')
   }
@@ -251,10 +267,25 @@ check('context: env mirrors stay ASCII and never carry the title', () => {
 
 check('placeholderValues exposes the documented names', () => {
   const values = core.placeholderValues(
-    { sessionId: 's', sessionTitle: 't', cwd: '/c', reason: 'turn-end', reasonDetail: 'completed' },
+    {
+      sessionId: 's',
+      sessionTitle: 't',
+      cwd: '/c',
+      reason: 'turn-end',
+      reasonDetail: 'completed',
+      triggeredAt: '2026-11-12T05:00:00.000Z',
+    },
     { id: 'r', name: 'R' },
   )
-  assert.deepEqual(values, { sessionId: 's', title: 't', cwd: '/c', reason: 'turn-end', detail: 'completed', rule: 'R' })
+  assert.deepEqual(values, {
+    sessionId: 's',
+    title: 't',
+    cwd: '/c',
+    reason: 'turn-end',
+    detail: 'completed',
+    rule: 'R',
+    time: '2026-11-12T05:00:00.000Z',
+  })
 })
 
 check('applyPlaceholders leaves unknown braces alone', () => {
@@ -359,12 +390,16 @@ check('validateRule catches empty, unsatisfiable and missing-file cases', () => 
   assert.equal(core.validateRule({ command: '/x/notify.sh' }, { exists: () => true }).ok, true)
 })
 
-check('sampleRule ships disabled, page-closed, pointing at examples/', () => {
-  const sample = core.sampleRule('/repo/dsh-idle-hook', 'darwin')
-  assert.equal(sample.enabled, false)
-  assert.equal(sample.precondition, 'page-closed')
-  assert.match(sample.command, /dsh-idle-hook[\\/]examples[\\/]notify-macos\.sh$/)
-  assert.equal(core.sampleRule('/repo/dsh-idle-hook', 'win32').command.endsWith('notify-windows.ps1'), true)
+check('sampleRule ships disabled, precondition any, pointing at examples/', () => {
+  const sample = core.sampleRule('/repo/dsh-notify-hub', 'darwin')
+  assert.equal(sample.enabled, false, '示例规则默认关闭，用户要自己启用')
+  assert.equal(
+    sample.precondition,
+    'any',
+    'page-closed 会让用户在提问/等待批准（此时页面必然开着）时永远收不到通知',
+  )
+  assert.match(sample.command, /dsh-notify-hub[\\/]examples[\\/]notify-macos\.sh$/)
+  assert.equal(core.sampleRule('/repo/dsh-notify-hub', 'win32').command.endsWith('notify-windows.ps1'), true)
 })
 
 check('the fallback schema always admits the config shape', () => {
@@ -394,26 +429,26 @@ check('validateEnv: errors for bad lines, warnings for contract/duplicates', () 
   const bad = core.validateEnv(['NO_EQUALS', '1BAD=x'])
   assert.equal(bad.errors.length, 2)
   assert.equal(bad.warnings.length, 0)
-  const warn = core.validateEnv(['IDLE_HOOK_REASON=fake', 'A=1', 'A=2'])
+  const warn = core.validateEnv(['NOTIFY_HUB_REASON=fake', 'A=1', 'A=2'])
   assert.equal(warn.errors.length, 0)
   assert.equal(warn.warnings.length, 2)
-  assert.match(warn.warnings.join(' '), /IDLE_HOOK_/)
-  assert.equal(core.validateEnv({ IDLE_HOOK_CWD: '/fake' }).warnings.length, 1)
+  assert.match(warn.warnings.join(' '), /NOTIFY_HUB_/)
+  assert.equal(core.validateEnv({ NOTIFY_HUB_CWD: '/fake' }).warnings.length, 1)
 })
 
-check('mergeEnv precedence: base < global < rule < IDLE_HOOK_* contract', () => {
+check('mergeEnv precedence: base < global < rule < NOTIFY_HUB_* contract', () => {
   const merged = core.mergeEnv(
     { PATH: '/bin', KEEP: 'base' },
-    { KEEP: 'global', GLOBAL_ONLY: 'g', IDLE_HOOK_REASON: 'nope' },
-    { KEEP: 'rule', IDLE_HOOK_SESSION_ID: 'nope', RULE_ONLY: 'r' },
-    { IDLE_HOOK_REASON: 'approval', IDLE_HOOK_SESSION_ID: 'session-1' },
+    { KEEP: 'global', GLOBAL_ONLY: 'g', NOTIFY_HUB_REASON: 'nope' },
+    { KEEP: 'rule', NOTIFY_HUB_SESSION_ID: 'nope', RULE_ONLY: 'r' },
+    { NOTIFY_HUB_REASON: 'approval', NOTIFY_HUB_SESSION_ID: 'session-1' },
   )
   assert.equal(merged.KEEP, 'rule')
   assert.equal(merged.GLOBAL_ONLY, 'g')
   assert.equal(merged.RULE_ONLY, 'r')
   assert.equal(merged.PATH, '/bin')
-  assert.equal(merged.IDLE_HOOK_REASON, 'approval', 'the contract always wins')
-  assert.equal(merged.IDLE_HOOK_SESSION_ID, 'session-1')
+  assert.equal(merged.NOTIFY_HUB_REASON, 'approval', 'the contract always wins')
+  assert.equal(merged.NOTIFY_HUB_SESSION_ID, 'session-1')
 })
 
 check('applyEnvPlaceholders substitutes values only', () => {
@@ -435,7 +470,7 @@ check('validateRule surfaces env problems and warnings', () => {
   const bad = core.validateRule({ command: '/x', env: ['BROKEN'] }, { exists: () => true })
   assert.equal(bad.ok, false)
   assert.match(bad.errors.join(' '), /缺少等号/)
-  const warn = core.validateRule({ command: '/x', env: { IDLE_HOOK_REASON: 'x' } }, { exists: () => true })
+  const warn = core.validateRule({ command: '/x', env: { NOTIFY_HUB_REASON: 'x' } }, { exists: () => true })
   assert.equal(warn.ok, true)
   assert.equal(warn.warnings.length, 1)
 })
@@ -471,6 +506,7 @@ await checkAsync('executor runs a real script with stdin JSON + env mirrors', as
     stdin: JSON.stringify(built.payload),
     timeoutMs: 15000,
   })
+  if (sandboxDenied(result)) return 'sandbox-skip'
   assert.equal(result.status, 'ok', JSON.stringify(result))
   assert.equal(result.exitCode, 0)
   assert.equal(result.stdout, 'probe done')
@@ -497,26 +533,29 @@ await checkAsync('executor hands the merged env to the script (contract beats a 
   const merged = core.mergeEnv(
     {},
     { GLOBAL_ONLY: 'g', SHARED: 'global' },
-    { RULE_ONLY: 'r', SHARED: 'rule', IDLE_HOOK_REASON: 'fake' },
+    { RULE_ONLY: 'r', SHARED: 'rule', NOTIFY_HUB_REASON: 'fake' },
     built.env,
   )
   const result = await spawnOnce(plan, { cwd: tmp, env: merged, stdin: JSON.stringify(built.payload), timeoutMs: 15000 })
+  if (sandboxDenied(result)) return 'sandbox-skip'
   assert.equal(result.status, 'ok', JSON.stringify(result))
   const seen = JSON.parse(fs.readFileSync(out2, 'utf8'))
   assert.equal(seen.globalOnly, 'g', 'the global env reaches the script')
   assert.equal(seen.ruleOnly, 'r', 'the rule env reaches the script')
-  assert.equal(seen.reason, 'turn-end', 'the IDLE_HOOK_* contract beats the rule value')
+  assert.equal(seen.reason, 'turn-end', 'the NOTIFY_HUB_* contract beats the rule value')
 })
 
 await checkAsync('executor kills a script that overruns the timeout', async () => {
   const plan = core.buildCommand({ command: path.join(fixtures, 'sleeper.mjs'), args: [], shell: false }, {}, { home: os.homedir() })
   const result = await spawnOnce(plan, { cwd: tmp, env: process.env, stdin: '', timeoutMs: 700 })
+  if (sandboxDenied(result)) return 'sandbox-skip'
   assert.equal(result.status, 'timeout')
 })
 
 await checkAsync('executor reports a non-zero exit as failed and keeps stderr', async () => {
   const plan = core.buildCommand({ command: path.join(fixtures, 'failer.mjs'), args: [], shell: false }, {}, { home: os.homedir() })
   const result = await spawnOnce(plan, { cwd: tmp, env: process.env, stdin: '', timeoutMs: 15000 })
+  if (sandboxDenied(result)) return 'sandbox-skip'
   assert.equal(result.status, 'failed')
   assert.equal(result.exitCode, 3)
   assert.equal(result.stderr, 'boom')
@@ -543,6 +582,127 @@ check('示例 Windows 脚本必须带 UTF-8 BOM：PS 5.1 把无 BOM 的 .ps1 按
   }
 })
 
+
+// --- email channel (pure config + MIME assembly) ------------------------------
+
+check('email: defaultEmail fills the template fields the settings UI edits', () => {
+  const email = core.defaultEmail()
+  assert.equal(email.port, 465)
+  assert.equal(email.secure, true)
+  assert.equal(email.starttls, true)
+  assert.equal(email.allowInsecureTls, false)
+  assert.equal(email.subject, core.DEFAULT_MAIL_SUBJECT)
+  assert.equal(email.body, core.DEFAULT_MAIL_BODY)
+})
+
+check('email: provider presets carry the right host/port/security', () => {
+  assert.equal(core.emailProvider('qq').host, 'smtp.qq.com')
+  assert.equal(core.emailProvider('qq').port, 465)
+  assert.equal(core.emailProvider('qq').secure, true)
+  assert.equal(core.emailProvider('outlook').port, 587)
+  assert.equal(core.emailProvider('outlook').secure, false)
+  // 未知 id 落回自定义，不要抛
+  assert.equal(core.emailProvider('nope').id, 'custom')
+})
+
+check('email: normalizeEmail clamps the port and falls back to the default templates', () => {
+  const a = core.normalizeEmail({ host: 'h', port: '587', subject: '', body: '' })
+  assert.equal(a.port, 587)
+  assert.equal(a.subject, core.DEFAULT_MAIL_SUBJECT)
+  assert.equal(a.body, core.DEFAULT_MAIL_BODY)
+  assert.equal(core.normalizeEmail({ port: 0 }).port, 1)
+  assert.equal(core.normalizeEmail({ port: 99999 }).port, 65535)
+  assert.equal(core.normalizeEmail({ secure: 'yes' }).secure, false, 'only a real true enables implicit TLS')
+})
+
+check('email: validateEmailConfig names every missing piece the user must fix', () => {
+  const base = { host: 'smtp.qq.com', to: 'me@qq.com', from: 'me@qq.com', pass: 'x' }
+  assert.deepEqual(core.validateEmailConfig(base), [])
+  assert.match(core.validateEmailConfig(Object.assign({}, base, { host: '' })).join('|'), /邮件服务器地址不能为空/)
+  assert.match(core.validateEmailConfig(Object.assign({}, base, { to: '' })).join('|'), /收件人不能为空/)
+  assert.match(core.validateEmailConfig(Object.assign({}, base, { to: 'not-an-address' })).join('|'), /收件人格式不正确/)
+  assert.match(core.validateEmailConfig(Object.assign({}, base, { from: 'bad' })).join('|'), /发件人格式不正确/)
+  assert.match(core.validateEmailConfig(Object.assign({}, base, { pass: '', passEnv: '1BAD' })).join('|'), /授权码环境变量名不合法/)
+  assert.match(core.validateEmailConfig(Object.assign({}, base, { pass: '', passEnv: '' })).join('|'), /授权码没有来源/)
+})
+
+check('email: resolveEmailPass prefers the typed code, then the named env var', () => {
+  const email = core.normalizeEmail({ pass: 'typed', passEnv: 'MAIL_CODE' })
+  assert.equal(core.resolveEmailPass(email, { MAIL_CODE: 'from-env' }), 'typed')
+  assert.equal(core.resolveEmailPass(core.normalizeEmail({ passEnv: 'MAIL_CODE' }), { MAIL_CODE: 'from-env' }), 'from-env')
+  assert.equal(core.resolveEmailPass(core.normalizeEmail({}), {}), '')
+  assert.equal(core.hasEmailPass(email, {}), true)
+  assert.equal(core.hasEmailPass(core.normalizeEmail({}), {}), false)
+})
+
+check('email: parseAddressList strips display names (RCPT TO takes a bare address)', () => {
+  assert.deepEqual(core.parseAddressList('"Me" <me@qq.com>, other@x.com; third@y.com'), ['me@qq.com', 'other@x.com', 'third@y.com'])
+  assert.deepEqual(core.parseAddressList(''), [])
+})
+
+check('email: buildMailMessage assembles an RFC-2047 subject and a base64 body', () => {
+  const msg = core.buildMailMessage({
+    host: 'smtp.qq.com', to: 'me@qq.com', from: 'me@qq.com', user: 'me@qq.com', pass: 'x',
+    subject: 'DSH 通知：{reason} · {title}',
+    body: '会话：{title}\n原因：{reason}\n时间：{time}',
+  }, {
+    title: '修复登录', reason: 'turn-end', detail: 'completed',
+    sessionId: 'session-1', cwd: '/proj/app', time: '2026-11-12T05:00:00.000Z',
+  }, Date.UTC(2026, 10, 12, 5, 0, 0))
+  assert.equal(msg.ok, true)
+  assert.deepEqual(msg.to, ['me@qq.com'])
+  assert.equal(msg.subject, 'DSH 通知：turn-end · 修复登录', 'placeholders are substituted in the subject')
+  assert.equal(msg.body, '会话：修复登录\n原因：turn-end\n时间：2026-11-12T05:00:00.000Z')
+  assert.match(msg.data, /\r\nSubject: =\?UTF-8\?B\?/, 'a non-ASCII subject is encoded as an RFC 2047 word')
+  assert.match(msg.data, /\r\nMIME-Version: 1\.0\r\n/)
+  assert.match(msg.data, /Content-Transfer-Encoding: base64/)
+  assert.match(msg.data, /Message-ID: <[^>]+@dsh-notify-hub>/)
+  const encoded = msg.data.split('\r\n\r\n')[1].replace(/\r\n/g, '')
+  assert.equal(Buffer.from(encoded, 'base64').toString('utf8'), msg.body, 'the body round-trips through base64')
+  assert.ok(msg.data.split('\r\n\r\n')[1].split('\r\n').every((l) => l.length <= 76), 'base64 lines stay under 76 columns')
+})
+
+check('email: a CRLF in the subject cannot inject a header', () => {
+  const msg = core.buildMailMessage({
+    to: 'me@qq.com', from: 'me@qq.com', user: 'me@qq.com', pass: 'x',
+    subject: 'Hi\r\nBcc: evil@example.com', body: 'b',
+  }, {}, Date.now())
+  assert.equal(msg.ok, true)
+  assert.ok(!/\r\nBcc:/.test(msg.data), 'no standalone Bcc header may appear')
+})
+
+check('email: buildMailMessage refuses an empty sender or recipient instead of sending', () => {
+  const noFrom = core.buildMailMessage({ to: 'me@qq.com', pass: 'x' }, {}, Date.now())
+  assert.equal(noFrom.ok, false)
+  assert.match(noFrom.error, /发件人为空/)
+  const noTo = core.buildMailMessage({ from: 'me@qq.com', pass: 'x' }, {}, Date.now())
+  assert.equal(noTo.ok, false)
+  assert.match(noTo.error, /收件人为空/)
+})
+
+check('email: classifySmtpError turns SMTP stages into actionable Chinese verdicts', () => {
+  assert.match(core.classifySmtpError('auth', 535, 'Login fail').message, /认证失败/)
+  assert.match(core.classifySmtpError('rcpt', 550, 'No such user').message, /收件人被拒/)
+  assert.match(core.classifySmtpError('connect', 0, '').message, /连接邮件服务器失败/)
+  assert.match(core.classifySmtpError('tls', 0, '').message, /TLS 握手失败/)
+  assert.match(core.classifySmtpError('data', 554, 'rejected').message, /投递失败/)
+  for (const stage of ['auth', 'rcpt', 'connect', 'tls', 'data']) {
+    assert.equal(core.classifySmtpError(stage, 1, 'x').status, 'failed')
+  }
+})
+
+check('email: a rule with channel=email is validated as an email rule, not as a script', () => {
+  const rule = core.normalizeRule({
+    id: 'r-mail', name: '邮件', channel: 'email',
+    triggers: { turnEnd: true },
+    email: { host: 'smtp.qq.com', to: 'me@qq.com', from: 'me@qq.com', pass: 'x' },
+  })
+  assert.equal(rule.channel, 'email')
+  assert.deepEqual(core.validateRule(rule).errors, [])
+  const broken = core.normalizeRule(Object.assign({}, rule, { email: { host: '', to: '', from: '', pass: '' } }))
+  assert.ok(core.validateRule(broken).errors.length > 0, 'an email rule with no host/to/pass must not validate')
+})
+
 fs.rmSync(tmp, { recursive: true, force: true })
 
 console.log('')
@@ -551,4 +711,4 @@ if (failures.length > 0) {
   for (const f of failures) console.log('  · ' + f)
   process.exit(1)
 }
-console.log(passed + ' checks passed')
+console.log(passed + ' checks passed' + (skipped > 0 ? ', ' + skipped + ' skipped (sandbox blocks child processes)' : ''))

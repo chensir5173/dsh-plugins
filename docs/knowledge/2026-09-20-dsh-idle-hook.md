@@ -1,5 +1,7 @@
 # DSH 插件：dsh-idle-hook（模型不在运行时跑脚本）
 
+> **2026-11-12 更新**：本插件已改名为 `dsh-notify-hub` 并新增内置 SMTP 邮件通道，路径与端点全部变更；改名迁移与邮件通道的结论见 [2026-11-12-dsh-notify-hub.md](2026-11-12-dsh-notify-hub.md)。本文保留为改名前的历史记录。
+
 日期：2026-09-20
 插件目录：`sub-plugins/dsh-idle-hook/`；OpenSpec：`openspec/changes/add-dsh-idle-hook/`
 

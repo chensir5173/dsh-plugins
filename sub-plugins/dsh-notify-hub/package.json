@@ -1,7 +1,7 @@
 {
-  "name": "dsh-idle-hook",
-  "version": "0.1.1",
-  "description": "Idle/awaiting-human hook for DeepSeek Harness: run a user-configured local script (python/bat/ps1/sh/executable) whenever the model is not running — turn finished, tool approval pending, or a question awaiting an answer — and push the notification wherever you want (macOS/Windows desktop, Bark/ntfy, chat webhooks, NetEase POPO).",
+  "name": "dsh-notify-hub",
+  "version": "0.3.0",
+  "description": "Notification hub for DeepSeek Harness: when the model stops (turn finished, tool approval pending, or a question awaiting an answer), run a local script or send an email through your own SMTP account (authorization code), so the notification reaches you wherever you are.",
   "type": "module",
   "license": "MIT",
   "keywords": [
@@ -9,8 +9,11 @@
     "dsh",
     "cordis",
     "notification",
+    "notify",
     "idle",
     "hook",
+    "email",
+    "smtp",
     "script",
     "approval"
   ],
@@ -35,6 +38,6 @@
     }
   },
   "scripts": {
-    "test": "node test/host-core.test.mjs && node test/bundle.test.mjs"
+    "test": "node test/host-core.test.mjs && node test/smtp.test.mjs && node test/bundle.test.mjs"
   }
 }

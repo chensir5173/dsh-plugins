@@ -522,7 +522,7 @@ function fallbackSectionSchema(field, fallback) {
  *
  * 0.2.0 退役了 `settings.installSection` / `register`；设置服务改为投影条目自己导出的
  * `Config`，对其它 ns 抛 `No configurable plugin entry`。link: 宿主半解析不到
- * `@deepseek-ai/schemastery`，schema 手写（同 dsh-idle-hook / dsh-esc-rewind）：
+ * `@deepseek-ai/schemastery`，schema 手写（同 dsh-notify-hub / dsh-esc-rewind）：
  * `~standard.validate` 给 cordis、`meta.volatile` + 真实 refs 表 `toJSON()` 给设置服务、
  * `~standard.vendor` 故意不叫 schemastery（让写配置走条目重启，apply 拿到新值）。
  */

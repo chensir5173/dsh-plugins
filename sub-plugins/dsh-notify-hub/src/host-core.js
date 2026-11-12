@@ -1,11 +1,11 @@
-// dsh-idle-hook: HOST core — pure, side-effect-free logic.
+// dsh-notify-hub: HOST core — pure, side-effect-free logic.
 //
 // Everything that can be unit-tested lives here: the turn-end trigger matrix,
 // interpreter selection, placeholder/env/context construction, presence
 // preconditions, debounce, failure counting and history trimming.
 // src/index.js only wires this core to the DSH host (session events, the two
-// approval/question waterfalls, the settings namespace, child processes and
-// the /__idle-hook/* HTTP endpoints).
+// approval/question waterfalls, the settings namespace, child processes, the
+// built-in SMTP mailer and the /__notify-hub/* HTTP endpoints).
 //
 // ESM (cordis bundle rule). This file must NEVER import @deepseek-ai/* — the
 // link: layout cannot resolve host packages from the repo (see
@@ -17,13 +17,19 @@ import path from 'node:path'
 // --- constants ---------------------------------------------------------------
 
 /** Bundle id / settings section id / plugin dir name. */
-export const PLUGIN_ID = 'dsh-idle-hook'
+export const PLUGIN_ID = 'dsh-notify-hub'
 /** HTTP prefix of this plugin's host endpoints. */
-export const HTTP_PREFIX = '/__idle-hook'
+export const HTTP_PREFIX = '/__notify-hub'
 /** Settings namespace inside <DSH_HOME|~/.dsh>/settings.yaml. */
-export const SETTINGS_NS = 'idle-hook'
+export const SETTINGS_NS = 'notify-hub'
 /** Host-owned state file (execution history + per-rule runtime counters). */
-export const HISTORY_FILE_NAME = 'idle-hook-history.json'
+export const HISTORY_FILE_NAME = 'notify-hub-history.json'
+
+// Names used before the 2026-11 rename (dsh-idle-hook). Read once and migrated,
+// never written back: the plugin keeps one version cycle of compatibility so an
+// upgrade does not lose the user's rules or history.
+export const LEGACY_SETTINGS_NS = 'idle-hook'
+export const LEGACY_HISTORY_FILE_NAME = 'idle-hook-history.json'
 /** Rolling history cap. */
 export const HISTORY_LIMIT = 200
 /** Per rule+session minimum gap between two triggers. */
@@ -42,6 +48,8 @@ export const TAIL_CHARS = 4000
 
 /** Trigger kinds reported to the script (also the `reason` field). */
 export const TRIGGER = { turnEnd: 'turn-end', approval: 'approval', question: 'question' }
+/** How a rule delivers its notification. */
+export const CHANNEL = { script: 'script', email: 'email' }
 /** Which session states count, per rule. */
 export const PRECONDITION = {
   any: 'any',
@@ -270,7 +278,15 @@ export function buildTriggerContext(input = {}) {
     ruleId: rule.id || null,
     ruleName: rule.name || null,
   }
+  // Both key sets are injected for one version cycle: user scripts written
+  // against the old IDLE_HOOK_* contract keep working after the rename.
   const env = {
+    NOTIFY_HUB_SESSION_ID: asciiSafe(payload.sessionId),
+    NOTIFY_HUB_RULE_ID: asciiSafe(payload.ruleId),
+    NOTIFY_HUB_REASON: asciiSafe(payload.reason),
+    NOTIFY_HUB_DETAIL: asciiSafe(payload.reasonDetail),
+    NOTIFY_HUB_TIME: asciiSafe(triggeredAt),
+    NOTIFY_HUB_CWD: payload.cwd == null ? '' : payload.cwd,
     IDLE_HOOK_SESSION_ID: asciiSafe(payload.sessionId),
     IDLE_HOOK_RULE_ID: asciiSafe(payload.ruleId),
     IDLE_HOOK_REASON: asciiSafe(payload.reason),
@@ -290,13 +306,22 @@ export function placeholderValues(payload = {}, rule = {}) {
     reason: payload.reason || '',
     detail: payload.reasonDetail || '',
     rule: rule.name || rule.id || '',
+    time: payload.triggeredAt || '',
   }
 }
 
 // --- environment variables (global + per rule) -------------------------------
 
 /** Keys the plugin itself injects: a rule may not overwrite the trigger contract. */
-export const CONTRACT_ENV_PREFIX = 'IDLE_HOOK_'
+export const CONTRACT_ENV_PREFIX = 'NOTIFY_HUB_'
+/** Pre-rename contract prefix, still injected (and still reserved). */
+export const LEGACY_CONTRACT_ENV_PREFIX = 'IDLE_HOOK_'
+
+/** True for both the current and the legacy inject-only env prefixes. */
+export function isReservedEnvKey(key) {
+  const name = String(key == null ? '' : key)
+  return name.indexOf(CONTRACT_ENV_PREFIX) === 0 || name.indexOf(LEGACY_CONTRACT_ENV_PREFIX) === 0
+}
 /** A portable env var name (POSIX + cmd both accept this shape). */
 export const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
 
@@ -405,7 +430,7 @@ export function mergeEnv(baseEnv, globalEnv, ruleEnv, contractEnv) {
   const merged = Object.assign({}, baseEnv || {})
   for (const layer of [globalEnv, ruleEnv]) {
     for (const [key, value] of Object.entries(normalizeEnv(layer))) {
-      if (key.indexOf(CONTRACT_ENV_PREFIX) === 0) continue
+      if (isReservedEnvKey(key)) continue
       merged[key] = value
     }
   }
@@ -434,6 +459,8 @@ export function normalizeRule(input = {}) {
     id: typeof src.id === 'string' && src.id ? src.id : newRuleId(),
     name: typeof src.name === 'string' && src.name.trim() ? src.name.trim().slice(0, 80) : '未命名规则',
     enabled: src.enabled === true,
+    channel: src.channel === CHANNEL.email ? CHANNEL.email : CHANNEL.script,
+    email: normalizeEmail(src.email),
     command: typeof src.command === 'string' ? src.command.trim() : '',
     args: Array.isArray(src.args) ? src.args.map((a) => String(a == null ? '' : a)) : [],
     interpreter: typeof src.interpreter === 'string' ? src.interpreter.trim() : '',
@@ -465,19 +492,26 @@ export function normalizeConfig(input) {
   }
 }
 
-/** The disabled sample rule seeded on first open (page-closed precondition). */
+/**
+ * The disabled sample rule seeded on first open.
+ *
+ * The precondition is 'any', NOT 'page-closed': the two cases users care about
+ * most (a question awaiting an answer, a tool approval pending) happen while the
+ * page is right in front of them, so a page-closed precondition would make the
+ * sample rule look broken ("installed, never fired").
+ */
 export function sampleRule(pluginDir, platform = process.platform) {
   const win = platform === 'win32'
   return normalizeRule({
     id: 'sample-notify',
-    name: win ? '示例：Windows 桌面通知（默认关闭）' : '示例：macOS 通知＋提示音（默认关闭）',
+    name: '示例：桌面通知脚本（默认关闭）',
     enabled: false,
     command: path.join(pluginDir, 'examples', win ? 'notify-windows.ps1' : 'notify-macos.sh'),
     args: [],
     interpreter: '',
     cwd: '',
     triggers: { turnEnd: true, approval: true, question: true },
-    precondition: PRECONDITION.pageClosed,
+    precondition: PRECONDITION.any,
     debounceMs: DEFAULT_DEBOUNCE_MS,
     timeoutMs: DEFAULT_TIMEOUT_MS,
     shell: false,
@@ -488,9 +522,13 @@ export function sampleRule(pluginDir, platform = process.platform) {
 export function validateRule(rule, probe = {}) {
   const errors = []
   const r = rule || {}
-  if (!String(r.command || '').trim()) errors.push('命令不能为空')
-  if (/[\r\n]/.test(String(r.command || ''))) {
-    errors.push('命令里不能有换行：这里只填脚本路径，「' + String(r.command).split(/\r?\n/)[0].trim() + '」这类解释器请填到「解释器」字段')
+  if (r.channel === CHANNEL.email) {
+    for (const problem of validateEmailConfig(r.email)) errors.push(problem)
+  } else {
+    if (!String(r.command || '').trim()) errors.push('命令不能为空')
+    if (/[\r\n]/.test(String(r.command || ''))) {
+      errors.push('命令里不能有换行：这里只填脚本路径，「' + String(r.command).split(/\r?\n/)[0].trim() + '」这类解释器请填到「解释器」字段')
+    }
   }
   const t = isPlainObject(r.triggers) ? r.triggers : {}
   if (t.turnEnd === false && t.approval === false && t.question === false) errors.push('至少要勾选一个触发条件')
@@ -502,6 +540,246 @@ export function validateRule(rule, probe = {}) {
   const envCheck = validateEnv(r.env)
   for (const problem of envCheck.errors) errors.push(problem)
   return { ok: errors.length === 0, errors, warnings: envCheck.warnings }
+}
+
+
+// --- email channel -----------------------------------------------------------
+
+/**
+ * One-click provider presets. Kept in the host core so the client half and the
+ * tests agree on the exact host/port/secure triple.
+ */
+export const EMAIL_PROVIDERS = [
+  { id: 'qq', label: 'QQ 邮箱', host: 'smtp.qq.com', port: 465, secure: true },
+  { id: '163', label: '网易 163', host: 'smtp.163.com', port: 465, secure: true },
+  { id: '126', label: '网易 126', host: 'smtp.126.com', port: 465, secure: true },
+  { id: 'gmail', label: 'Gmail', host: 'smtp.gmail.com', port: 465, secure: true },
+  { id: 'outlook', label: 'Outlook', host: 'smtp.office365.com', port: 587, secure: false },
+  { id: 'custom', label: '自定义', host: '', port: 465, secure: true },
+]
+
+export const DEFAULT_MAIL_SUBJECT = 'DSH 通知：{reason} · {title}'
+export const DEFAULT_MAIL_BODY = [
+  '会话：{title}（{sessionId}）',
+  '目录：{cwd}',
+  '原因：{reason} {detail}',
+  '时间：{time}',
+  '',
+  '—— 由 DSH 通知枢纽自动发送',
+].join('\n')
+
+/** Provider preset by id (falls back to the custom preset). */
+export function emailProvider(id) {
+  const key = String(id == null ? '' : id)
+  for (const item of EMAIL_PROVIDERS) if (item.id === key) return item
+  return EMAIL_PROVIDERS[EMAIL_PROVIDERS.length - 1]
+}
+
+function emailStr(value) {
+  return value == null ? '' : String(value).trim()
+}
+
+export function defaultEmail() {
+  return {
+    host: '',
+    port: 465,
+    secure: true,
+    starttls: true,
+    user: '',
+    pass: '',
+    passEnv: '',
+    from: '',
+    to: '',
+    subject: DEFAULT_MAIL_SUBJECT,
+    body: DEFAULT_MAIL_BODY,
+    allowInsecureTls: false,
+  }
+}
+
+/**
+ * Shape an arbitrary settings object into a complete email config. Never throws,
+ * never drops the user's authorization code (it is only ever hidden at the
+ * status/HTTP boundary).
+ */
+export function normalizeEmail(input = {}) {
+  const src = isPlainObject(input) ? input : {}
+  const def = defaultEmail()
+  return {
+    host: emailStr(src.host),
+    port: clampInt(src.port, 1, 65535, def.port),
+    secure: src.secure === undefined ? def.secure : src.secure === true,
+    starttls: src.starttls === undefined ? def.starttls : src.starttls !== false,
+    user: emailStr(src.user),
+    pass: emailStr(src.pass),
+    passEnv: emailStr(src.passEnv),
+    from: emailStr(src.from),
+    to: emailStr(src.to),
+    subject: emailStr(src.subject) || def.subject,
+    // 空串也回落默认：用户在设置里清空正文模板时，不该保存成一封没有内容的邮件
+    body: typeof src.body === 'string' && src.body.trim() ? src.body : def.body,
+    allowInsecureTls: src.allowInsecureTls === true,
+  }
+}
+
+const ADDRESS_RE = /^[^\s@,;]+@[^\s@,;]+\.[^\s@,;]+$/
+
+/**
+ * Split "a@x.com, b@y.com" (also ';' separated) into a bare address list.
+ * "Name <a@x.com>" is reduced to a@x.com: RCPT TO only accepts the address, and
+ * keeping a display name would also break the address check below.
+ */
+export function parseAddressList(value) {
+  return String(value == null ? '' : value)
+    .split(/[,;]/)
+    .map((item) => {
+      const raw = item.trim()
+      if (!raw) return ''
+      const named = /^(.*)<([^>]+)>\s*$/.exec(raw)
+      return (named ? named[2] : raw).trim()
+    })
+    .filter(Boolean)
+}
+
+/** Returns a list of human readable problems (empty = valid). */
+export function validateEmailConfig(input = {}) {
+  const email = normalizeEmail(input)
+  const errors = []
+  if (!email.host) errors.push('邮件服务器地址不能为空')
+  if (!email.to) errors.push('收件人不能为空')
+  const badTo = parseAddressList(email.to).filter((item) => !ADDRESS_RE.test(item))
+  if (badTo.length) errors.push('收件人格式不正确：' + badTo.join(', '))
+  if (email.from) {
+    const badFrom = parseAddressList(email.from).filter((item) => !ADDRESS_RE.test(item))
+    if (badFrom.length) errors.push('发件人格式不正确：' + badFrom.join(', '))
+  }
+  if (email.passEnv && !ENV_KEY_RE.test(email.passEnv)) {
+    errors.push('授权码环境变量名不合法：' + email.passEnv)
+  }
+  if (!email.pass && !email.passEnv) {
+    errors.push('授权码没有来源：请直接在设置里填写，或指定一个环境变量名')
+  }
+  return errors
+}
+
+/**
+ * The authorization code, in priority order: the value typed in settings, then
+ * the named environment variable (which may come from the global or the rule's
+ * env map). Never logged, never returned by /status.
+ */
+export function resolveEmailPass(email, env = {}) {
+  const direct = email && typeof email.pass === 'string' ? email.pass : ''
+  if (direct) return direct
+  const key = email && typeof email.passEnv === 'string' ? email.passEnv.trim() : ''
+  if (key && env && typeof env[key] === 'string') return env[key]
+  return ''
+}
+
+/** True when a credential is configured either directly or via env. */
+export function hasEmailPass(email, env = {}) {
+  const direct = email && typeof email.pass === 'string' ? email.pass.trim() : ''
+  if (direct) return true
+  const key = email && typeof email.passEnv === 'string' ? email.passEnv.trim() : ''
+  return !!(key && env && typeof env[key] === 'string' && env[key])
+}
+
+/** RFC 2047 encode a header value when it contains non-ASCII characters. */
+export function encodeMimeHeader(value) {
+  // A raw CR/LF inside a header value is header injection, so flatten first.
+  const raw = (value == null ? '' : String(value)).replace(/[\r\n]+/g, ' ')
+  if (!/[^\x20-\x7E]/.test(raw)) return raw
+  const words = []
+  let part = ''
+  for (const ch of raw) {
+    const next = part + ch
+    // 45 bytes of UTF-8 stays under the 76-column encoded-word limit.
+    if (Buffer.byteLength(next, 'utf8') > 45) {
+      if (part) words.push(part)
+      part = ch
+    } else {
+      part = next
+    }
+  }
+  if (part) words.push(part)
+  return words.map((word) => '=?UTF-8?B?' + Buffer.from(word, 'utf8').toString('base64') + '?=').join(' ')
+}
+
+/** Encode an address, keeping "Name <addr>" shape when a display name is used. */
+export function encodeAddress(value) {
+  const raw = String(value == null ? '' : value).replace(/[\r\n]+/g, ' ').trim()
+  if (!raw) return ''
+  if (!/[^\x20-\x7E]/.test(raw)) return raw
+  const named = /^(.*)<([^>]+)>\s*$/.exec(raw)
+  if (named) {
+    const label = named[1].trim()
+    return (label ? encodeMimeHeader(label) + ' ' : '') + '<' + named[2].trim() + '>'
+  }
+  return raw
+}
+
+/** base64 the body and wrap it at 76 columns (RFC 2045). */
+export function base64Body(text) {
+  const encoded = Buffer.from(String(text == null ? '' : text), 'utf8').toString('base64')
+  const lines = []
+  for (let i = 0; i < encoded.length; i += 76) lines.push(encoded.slice(i, i + 76))
+  return lines.join('\r\n')
+}
+
+/** SMTP dot-stuffing: a line starting with '.' must be doubled in DATA. */
+export function dotStuff(text) {
+  return String(text == null ? '' : text).replace(/^\./gm, '..')
+}
+
+/**
+ * Build the complete RFC 5322 message for one trigger. Returns { ok: false,
+ * error } when the address side is incomplete, so the caller can record a
+ * precise history entry without opening a socket.
+ */
+export function buildMailMessage(emailInput, values = {}, now = Date.now()) {
+  const email = normalizeEmail(emailInput)
+  const to = parseAddressList(email.to)
+  const from = email.from || email.user
+  if (!from) return { ok: false, error: '发件人为空：请在设置里填写发件地址（多数邮箱要求与登录账号一致）' }
+  if (!to.length) return { ok: false, error: '收件人为空：请在设置里填写收件地址' }
+  const subject = applyPlaceholders(email.subject || DEFAULT_MAIL_SUBJECT, values)
+  const bodyText = applyPlaceholders(email.body || DEFAULT_MAIL_BODY, values)
+  const date = new Date(now)
+  const messageId = '<' + now.toString(36) + '-' + Math.random().toString(36).slice(2, 10) + '@dsh-notify-hub>'
+  const headers = [
+    'From: ' + encodeAddress(from),
+    'To: ' + to.map(encodeAddress).join(', '),
+    'Subject: ' + encodeMimeHeader(subject),
+    'Date: ' + date.toUTCString(),
+    'Message-ID: ' + messageId,
+    'MIME-Version: 1.0',
+    'Content-Type: text/plain; charset=UTF-8',
+    'Content-Transfer-Encoding: base64',
+    'X-Mailer: dsh-notify-hub',
+  ]
+  const data = headers.join('\r\n') + '\r\n\r\n' + dotStuff(base64Body(bodyText))
+  return {
+    ok: true,
+    from,
+    to,
+    subject,
+    body: bodyText,
+    messageId,
+    data,
+  }
+}
+
+/**
+ * Turn an SMTP stage + server reply into a history verdict. The wording matters:
+ * the settings page shows it verbatim, and "认证失败" is the one cause users can
+ * actually fix without reading server logs.
+ */
+export function classifySmtpError(stage, code, reply) {
+  const detail = String(reply == null ? '' : reply).trim()
+  const suffix = detail ? '：' + detail : ''
+  if (stage === 'auth') return { status: 'failed', message: '认证失败，请检查邮箱授权码' + suffix }
+  if (stage === 'rcpt') return { status: 'failed', message: '收件人被拒' + suffix }
+  if (stage === 'connect' || stage === 'greeting') return { status: 'failed', message: '连接邮件服务器失败' + suffix }
+  if (stage === 'tls') return { status: 'failed', message: 'TLS 握手失败' + suffix }
+  return { status: 'failed', message: '投递失败（' + (stage || 'smtp') + '）' + suffix }
 }
 
 // --- presence ----------------------------------------------------------------

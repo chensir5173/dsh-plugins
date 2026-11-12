@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""dsh-idle-hook 示例：把「DSH 停下来了」推到 iPhone（Bark）
+"""dsh-notify-hub 示例：把「DSH 停下来了」推到 iPhone（Bark）
 
 契约（插件传给你的东西，别额外假设）：
   stdin  : 一行 UTF-8 JSON
            {"sessionId","sessionTitle","cwd","reason","reasonDetail","triggeredAt","ruleId","ruleName"}
-  环境变量: IDLE_HOOK_SESSION_ID / IDLE_HOOK_RULE_ID / IDLE_HOOK_CWD
-            / IDLE_HOOK_REASON / IDLE_HOOK_DETAIL / IDLE_HOOK_TIME
+  环境变量: NOTIFY_HUB_SESSION_ID / NOTIFY_HUB_RULE_ID / NOTIFY_HUB_CWD
+            / NOTIFY_HUB_REASON / NOTIFY_HUB_DETAIL / NOTIFY_HUB_TIME
   cwd    : 插件已切到「规则的工作目录」，相对路径可以直接用
   超时   : 默认 30 秒，超时会被插件杀掉 —— 本脚本网络超时 5 秒，不阻塞
 
@@ -16,7 +16,7 @@
 可选：
   BARK_SOUND 铃声名，如 birdsong / alarm；  BARK_GROUP 分组名，如 DSH
   BARK_LEVEL active / timeSensitive / critical；  BARK_ICON 图标 URL
-  IDLE_HOOK_TITLE 覆盖通知标题
+  NOTIFY_HUB_TITLE 覆盖通知标题
 
 用法：
   echo '{"sessionTitle":"修 bug","reason":"approval"}' | ./notify-bark.py
@@ -75,10 +75,10 @@ def load_payload():
 def compose(payload):
     """把上下文变成人类看得懂的标题 + 正文；没有 stdin 时给出友好默认值"""
     session_title = str(payload.get("sessionTitle") or "").strip() or "未命名会话"
-    reason = str(payload.get("reason") or os.environ.get("IDLE_HOOK_REASON") or "turn-end").strip()
-    detail = str(payload.get("reasonDetail") or os.environ.get("IDLE_HOOK_DETAIL") or "").strip()
-    cwd = str(payload.get("cwd") or os.environ.get("IDLE_HOOK_CWD") or "").strip() or os.getcwd()
-    when = str(payload.get("triggeredAt") or os.environ.get("IDLE_HOOK_TIME") or "").strip()
+    reason = str(payload.get("reason") or os.environ.get("NOTIFY_HUB_REASON") or "turn-end").strip()
+    detail = str(payload.get("reasonDetail") or os.environ.get("NOTIFY_HUB_DETAIL") or "").strip()
+    cwd = str(payload.get("cwd") or os.environ.get("NOTIFY_HUB_CWD") or "").strip() or os.getcwd()
+    when = str(payload.get("triggeredAt") or os.environ.get("NOTIFY_HUB_TIME") or "").strip()
 
     if reason == "approval":
         title, reason_text = "DSH 停下来了 · 等你批准", "工具调用在等你批准"
@@ -97,7 +97,7 @@ def compose(payload):
     else:
         title, reason_text = "DSH 停下来了", "触发原因：%s" % reason
 
-    title = os.environ.get("IDLE_HOOK_TITLE") or title
+    title = os.environ.get("NOTIFY_HUB_TITLE") or title
     lines = ["会话：%s" % session_title, reason_text, "目录：%s" % cwd]
     if when:
         lines.append("时间：%s" % when)
@@ -155,7 +155,7 @@ def main():
     try:
         request = urllib.request.Request(
             url, data=b"", method="POST",
-            headers={"User-Agent": "dsh-idle-hook/0.1", "Content-Type": "text/plain; charset=utf-8"},
+            headers={"User-Agent": "dsh-notify-hub/0.1", "Content-Type": "text/plain; charset=utf-8"},
         )
         with urllib.request.urlopen(request, timeout=TIMEOUT) as resp:
             status = getattr(resp, "status", 200)

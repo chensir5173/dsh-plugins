@@ -1,18 +1,18 @@
 ﻿<#
-  dsh-idle-hook 示例：Windows 本地提醒（Win10/11 原生 Toast + 可选提示音）
+  dsh-notify-hub 示例：Windows 本地提醒（Win10/11 原生 Toast + 可选提示音）
 
   契约（插件传给你的东西，别额外假设）：
     stdin : 一行 UTF-8 JSON
             {"sessionId","sessionTitle","cwd","reason","reasonDetail","triggeredAt","ruleId","ruleName"}
-    环境变量: IDLE_HOOK_SESSION_ID / IDLE_HOOK_RULE_ID / IDLE_HOOK_CWD
-              / IDLE_HOOK_REASON / IDLE_HOOK_DETAIL / IDLE_HOOK_TIME
+    环境变量: NOTIFY_HUB_SESSION_ID / NOTIFY_HUB_RULE_ID / NOTIFY_HUB_CWD
+              / NOTIFY_HUB_REASON / NOTIFY_HUB_DETAIL / NOTIFY_HUB_TIME
     cwd   : 插件已切到「规则的工作目录」，相对路径可以直接用
     超时  : 默认 30 秒，超时会被插件杀掉 —— 本脚本没有任何阻塞等待
 
   可选调参（都有默认值）：
-    IDLE_HOOK_TITLE       覆盖通知标题（notify-router.py 会用到）
-    IDLE_HOOK_BEEP=0      关掉提示音（默认 1，响一声）
-    IDLE_HOOK_DRY_RUN=1   只打印，不弹窗（自测用），等价于 -DryRun
+    NOTIFY_HUB_TITLE       覆盖通知标题（notify-router.py 会用到）
+    NOTIFY_HUB_BEEP=0      关掉提示音（默认 1，响一声）
+    NOTIFY_HUB_DRY_RUN=1   只打印，不弹窗（自测用），等价于 -DryRun
 
   用法：powershell -NoProfile -ExecutionPolicy Bypass -File notify-windows.ps1
   依赖：Windows PowerShell 5.1（系统自带），无需安装任何模块。
@@ -53,9 +53,9 @@ if ($raw -and $raw.Trim().Length -gt 0) {
 
 # ---------- 2. 取字段：优先 stdin JSON，其次环境变量，最后友好默认值 ----------
 $sessionTitle = if ($data -and $data.sessionTitle) { [string]$data.sessionTitle } else { '未命名会话' }
-$reason       = if ($data -and $data.reason)       { [string]$data.reason }       elseif ($env:IDLE_HOOK_REASON) { $env:IDLE_HOOK_REASON } else { 'turn-end' }
-$detail       = if ($data -and $data.reasonDetail) { [string]$data.reasonDetail } elseif ($env:IDLE_HOOK_DETAIL) { $env:IDLE_HOOK_DETAIL } else { '' }
-$workdir      = if ($data -and $data.cwd)          { [string]$data.cwd }          elseif ($env:IDLE_HOOK_CWD) { $env:IDLE_HOOK_CWD } else { (Get-Location).Path }
+$reason       = if ($data -and $data.reason)       { [string]$data.reason }       elseif ($env:NOTIFY_HUB_REASON) { $env:NOTIFY_HUB_REASON } else { 'turn-end' }
+$detail       = if ($data -and $data.reasonDetail) { [string]$data.reasonDetail } elseif ($env:NOTIFY_HUB_DETAIL) { $env:NOTIFY_HUB_DETAIL } else { '' }
+$workdir      = if ($data -and $data.cwd)          { [string]$data.cwd }          elseif ($env:NOTIFY_HUB_CWD) { $env:NOTIFY_HUB_CWD } else { (Get-Location).Path }
 
 # ---------- 3. 按「为什么停下来」组织文案 ----------
 $titleBase = 'DSH 停下来了'
@@ -85,13 +85,13 @@ switch ($reason) {
     $reasonText = "触发原因：$reason"
   }
 }
-if ($env:IDLE_HOOK_TITLE) { $title = $env:IDLE_HOOK_TITLE }
+if ($env:NOTIFY_HUB_TITLE) { $title = $env:NOTIFY_HUB_TITLE }
 
 $body = @($sessionTitle, $reasonText, $workdir) -join $newline
 $oneLine = "$sessionTitle | $reasonText | $workdir"
 
 # ---------- 4. 试跑模式：只打印，不弹窗 ----------
-if ($DryRun -or $env:IDLE_HOOK_DRY_RUN -eq '1') {
+if ($DryRun -or $env:NOTIFY_HUB_DRY_RUN -eq '1') {
   Write-Output "[notify-windows] DRY-RUN 标题=$title 正文=$oneLine"
   exit 0
 }
@@ -150,7 +150,7 @@ if (-not $ok) { $ok = (Show-Balloon $title $body) }
 if (-not $ok) { $ok = (Show-Msg $title $body) }
 
 # ---------- 8. 提示音 ----------
-if ($env:IDLE_HOOK_BEEP -ne '0') {
+if ($env:NOTIFY_HUB_BEEP -ne '0') {
   try { [console]::beep(880, 200) } catch { Write-Verbose '当前宿主没有控制台，跳过提示音' }
 }
 

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""dsh-idle-hook 示例：按「为什么停下来」分发到不同渠道的调度器
+"""dsh-notify-hub 示例：按「为什么停下来」分发到不同渠道的调度器
 
 思路：
-  1. 读 stdin JSON / IDLE_HOOK_* 环境变量，拿到 reason（turn-end / approval / question）；
+  1. 读 stdin JSON / NOTIFY_HUB_* 环境变量，拿到 reason（turn-end / approval / question）；
   2. 按 reason 选一种「语气」：等待批准 = 急（标题带 ⚠️ + 响 3 声），
      等待回答 = 中（🙋 + 响 2 声），一轮结束 = 安静（默认不响）；
   3. 把同一份契约（stdin JSON + 环境变量）交给若干个渠道脚本去发。
@@ -23,8 +23,8 @@
 契约（插件传给你的东西，别额外假设）：
   stdin  : 一行 UTF-8 JSON
            {"sessionId","sessionTitle","cwd","reason","reasonDetail","triggeredAt","ruleId","ruleName"}
-  环境变量: IDLE_HOOK_SESSION_ID / IDLE_HOOK_RULE_ID / IDLE_HOOK_CWD
-            / IDLE_HOOK_REASON / IDLE_HOOK_DETAIL / IDLE_HOOK_TIME
+  环境变量: NOTIFY_HUB_SESSION_ID / NOTIFY_HUB_RULE_ID / NOTIFY_HUB_CWD
+            / NOTIFY_HUB_REASON / NOTIFY_HUB_DETAIL / NOTIFY_HUB_TIME
   超时   : 默认 30 秒 —— 本脚本给每个渠道 8 秒、总预算 20 秒，绝不超过。
 
 用法：
@@ -112,8 +112,8 @@ def load_payload():
 
 def tone_of(payload):
     """决定这次通知的语气；返回 (reason, tone, 标题, 正文行列表)"""
-    reason = str(payload.get("reason") or os.environ.get("IDLE_HOOK_REASON") or "turn-end").strip()
-    detail = str(payload.get("reasonDetail") or os.environ.get("IDLE_HOOK_DETAIL") or "").strip()
+    reason = str(payload.get("reason") or os.environ.get("NOTIFY_HUB_REASON") or "turn-end").strip()
+    detail = str(payload.get("reasonDetail") or os.environ.get("NOTIFY_HUB_DETAIL") or "").strip()
     tone = dict(TONES.get(reason) or TONES["unknown"])
 
     if reason == "turn-end":
@@ -216,17 +216,17 @@ def main():
     payload = load_payload()
     reason, tone, title = tone_of(payload)
     session_title = str(payload.get("sessionTitle") or "").strip() or "未命名会话"
-    cwd = str(payload.get("cwd") or os.environ.get("IDLE_HOOK_CWD") or "").strip() or os.getcwd()
+    cwd = str(payload.get("cwd") or os.environ.get("NOTIFY_HUB_CWD") or "").strip() or os.getcwd()
 
     # 补齐一份完整 payload 再传给渠道脚本：手工运行时也有合理内容
     forwarded = {
-        "sessionId": payload.get("sessionId") or os.environ.get("IDLE_HOOK_SESSION_ID") or None,
+        "sessionId": payload.get("sessionId") or os.environ.get("NOTIFY_HUB_SESSION_ID") or None,
         "sessionTitle": payload.get("sessionTitle") or "未命名会话",
         "cwd": payload.get("cwd") or cwd,
         "reason": payload.get("reason") or reason,
-        "reasonDetail": payload.get("reasonDetail") or os.environ.get("IDLE_HOOK_DETAIL") or None,
-        "triggeredAt": payload.get("triggeredAt") or os.environ.get("IDLE_HOOK_TIME") or None,
-        "ruleId": payload.get("ruleId") or os.environ.get("IDLE_HOOK_RULE_ID") or None,
+        "reasonDetail": payload.get("reasonDetail") or os.environ.get("NOTIFY_HUB_DETAIL") or None,
+        "triggeredAt": payload.get("triggeredAt") or os.environ.get("NOTIFY_HUB_TIME") or None,
+        "ruleId": payload.get("ruleId") or os.environ.get("NOTIFY_HUB_RULE_ID") or None,
         "ruleName": payload.get("ruleName"),
     }
     payload_json = json.dumps(forwarded, ensure_ascii=False)
@@ -234,18 +234,18 @@ def main():
     # 给渠道脚本的额外环境：覆盖标题 / 声音 / 优先级，让语气统一
     env = dict(os.environ)
     env.update({
-        "IDLE_HOOK_TITLE": title,
-        "IDLE_HOOK_REASON": reason,
-        "IDLE_HOOK_DETAIL": str(forwarded["reasonDetail"] or ""),
-        "IDLE_HOOK_CWD": cwd,
-        "IDLE_HOOK_SOUND": tone["sound"],
-        "IDLE_HOOK_SOUND_REPEAT": tone["repeat"],
+        "NOTIFY_HUB_TITLE": title,
+        "NOTIFY_HUB_REASON": reason,
+        "NOTIFY_HUB_DETAIL": str(forwarded["reasonDetail"] or ""),
+        "NOTIFY_HUB_CWD": cwd,
+        "NOTIFY_HUB_SOUND": tone["sound"],
+        "NOTIFY_HUB_SOUND_REPEAT": tone["repeat"],
         "NTFY_PRIORITY": tone["priority"],
         "NTFY_TAGS": {"approval": "warning", "question": "question"}.get(reason, "white_check_mark"),
     })
     if dry_run:
         env["DRY_RUN"] = "1"
-        env["IDLE_HOOK_DRY_RUN"] = "1"
+        env["NOTIFY_HUB_DRY_RUN"] = "1"
 
     names = pick_channels(argv_opts, reason)
     if not names:

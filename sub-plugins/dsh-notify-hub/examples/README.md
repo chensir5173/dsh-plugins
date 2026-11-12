@@ -1,4 +1,4 @@
-# dsh-idle-hook 通知示例脚本
+# dsh-notify-hub 通知示例脚本
 
 DSH 停下来（一轮结束 / 等你批准 / 等你回答）时，插件会调用你在规则里配的**本地脚本**。
 这里的脚本都是「拿起来就能用」的参考实现：第一行 print/echo 就是给你看的执行结果，失败时退出码非 0（插件执行历史里能直接看到）。
@@ -23,12 +23,12 @@ DSH 停下来（一轮结束 / 等你批准 / 等你回答）时，插件会调�
 
 ```bash
 # 环境变量（插件已设置好；适合在「参数」里 $(...)/%VAR% 不方便的场合）
-IDLE_HOOK_SESSION_ID   # 会话 id
-IDLE_HOOK_RULE_ID      # 规则 id
-IDLE_HOOK_CWD          # 会话工作目录
-IDLE_HOOK_REASON       # turn-end | approval | question
-IDLE_HOOK_DETAIL       # 同上 reasonDetail
-IDLE_HOOK_TIME         # ISO 8601 触发时刻
+NOTIFY_HUB_SESSION_ID   # 会话 id
+NOTIFY_HUB_RULE_ID      # 规则 id
+NOTIFY_HUB_CWD          # 会话工作目录
+NOTIFY_HUB_REASON       # turn-end | approval | question
+NOTIFY_HUB_DETAIL       # 同上 reasonDetail
+NOTIFY_HUB_TIME         # ISO 8601 触发时刻
 ```
 
 另外：插件会把工作目录切到规则配置的「工作目录」（没配就是会话目录），所以脚本里的相对路径可以直接用；脚本默认 30 秒超时，超时会被杀掉 —— **所有示例的网络调用都是 5 秒超时，不会卡住**。
@@ -51,8 +51,8 @@ IDLE_HOOK_TIME         # ISO 8601 触发时刻
 
 | 示例文件 | 做什么 | 需要什么变量 | 可选变量 |
 | --- | --- | --- | --- |
-| `notify-macos.sh` | macOS 本机：系统提示音（`afplay`）+ 原生桌面通知（`osascript`）；没有 osascript 就只响铃 | 无 | `IDLE_HOOK_SOUND`（默认 Glass.aiff，也可只写名字如 Tink / Sosumi）、`IDLE_HOOK_SOUND_REPEAT`、`IDLE_HOOK_TITLE` |
-| `notify-windows.ps1` | Windows 本机：Win10/11 原生 Toast（WinRT）+ 可选提示音；Toast 不可用时依次退到气泡通知、`msg` | 无 | `IDLE_HOOK_BEEP=0` 关声音、`IDLE_HOOK_TITLE` |
+| `notify-macos.sh` | macOS 本机：系统提示音（`afplay`）+ 原生桌面通知（`osascript`）；没有 osascript 就只响铃 | 无 | `NOTIFY_HUB_SOUND`（默认 Glass.aiff，也可只写名字如 Tink / Sosumi）、`NOTIFY_HUB_SOUND_REPEAT`、`NOTIFY_HUB_TITLE` |
+| `notify-windows.ps1` | Windows 本机：Win10/11 原生 Toast（WinRT）+ 可选提示音；Toast 不可用时依次退到气泡通知、`msg` | 无 | `NOTIFY_HUB_BEEP=0` 关声音、`NOTIFY_HUB_TITLE` |
 | `notify-bark.py` | 手机推送（iOS，Bark）：POST 到 Bark 的路径式接口 | `BARK_KEY` | `BARK_BASE`（默认 https://api.day.app）、`BARK_SOUND`、`BARK_GROUP`、`BARK_LEVEL`、`BARK_ICON` |
 | `notify-ntfy.sh` | ntfy 推送（安卓/iOS/桌面都能收，也可自建） | `NTFY_TOPIC` | `NTFY_BASE`（默认 https://ntfy.sh）、`NTFY_TOKEN`、`NTFY_PRIORITY`、`NTFY_TAGS` |
 | `notify-webhook.sh` | 一个脚本覆盖 5 家聊天机器人：飞书 / 企业微信 / 钉钉 / Telegram / Slack（按每家要求的 JSON 分别拼） | `WEBHOOK_KIND` + `WEBHOOK_URL`；telegram 用 `TELEGRAM_BOT_TOKEN`+`TELEGRAM_CHAT_ID` | `FEISHU_WEBHOOK_URL` / `WECOM_WEBHOOK_URL` / `DINGTALK_WEBHOOK_URL` / `SLACK_WEBHOOK_URL` |
@@ -179,7 +179,7 @@ dsh ...            # 必须在同一个终端里启动 dsh，否则读不到
 **（c）直接写在规则的「参数」里**（配置里是明文，注意别把配置同步到公开地方）
 
 ```
-命令:   /Users/you/projects/dsh-plugins/dsh-idle-hook/examples/private/notify-popo.py
+命令:   /Users/you/projects/dsh-plugins/dsh-notify-hub/examples/private/notify-popo.py
 参数:   --access-key
         your_access_key
         --receiver

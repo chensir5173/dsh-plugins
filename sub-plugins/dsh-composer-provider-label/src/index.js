@@ -30,7 +30,7 @@
 // `composer-provider-label` = the row id the manager writes). The Config below is
 // therefore exported for that generation — a hand-rolled schema, because a
 // `link:` host half cannot import `@deepseek-ai/schemastery` (verified:
-// ERR_MODULE_NOT_FOUND), see dsh-idle-hook/src/index.js for the full rationale.
+// ERR_MODULE_NOT_FOUND), see dsh-notify-hub/src/index.js for the full rationale.
 
 const name = 'composer-provider-label'
 const NS = 'dsh-composer-provider-label'
