@@ -1,0 +1,39 @@
+{
+  "name": "dsh-sidebar-footer-stack",
+  "version": "0.2.0",
+  "description": "Stacks the sidebar's bottom-left footer entries vertically instead of squeezing them into one horizontal row. The core sidebar (dsh-client-ui-sidebar) renders slot 'sidebar.footer.action' as div._footerActions { display:flex } with no flex-direction, so every plugin that registers there (remote bridge, usage/billing, update, ...) shares the same 264px row: labels truncate ('Re...') and a wide card drops into its own @container degraded form. The core has no config switch for this and every skin would need its own override, so this plugin injects one suffix-stable rule through the webserver/index-inject seam — [class*=\"_footArea\"] > [class*=\"_footerActions\"] { flex-direction:column; align-items:stretch } with width:100% on each entry — wrapped in a container query so the collapsed rail keeps the core layout, and with a :not(:has(> * + *)) fallback so a single entry stays horizontal. Works for every theme; ships a zero-UI client half that only verifies the rule is in effect (window.__dshSidebarFooterStack.report()).",
+  "type": "module",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "dsh-plugin",
+    "dsh",
+    "cordis",
+    "sidebar",
+    "footer",
+    "layout",
+    "css",
+    "skin"
+  ],
+  "files": [
+    "src/",
+    "README.md",
+    "ACCEPTANCE.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./client": "./src/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web"
+    }
+  }
+}
