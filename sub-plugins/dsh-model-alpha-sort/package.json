@@ -1,0 +1,35 @@
+{
+  "name": "dsh-model-alpha-sort",
+  "version": "0.1.0",
+  "description": "按显示名给每个提供方的模型目录做稳定字母排序：设置页底部卡片手动触发，宿主启动时自动排一次。",
+  "type": "module",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "model",
+    "sort"
+  ],
+  "files": [
+    "src",
+    "README.md",
+    "ACCEPTANCE.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./client": "./src/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web"
+    }
+  }
+}
