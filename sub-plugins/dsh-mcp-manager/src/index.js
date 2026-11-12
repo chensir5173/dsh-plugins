@@ -2032,6 +2032,13 @@ async function registerTools(ctx) {
         name: spec.name,
         description: spec.description,
         parameters: spec.parameters,
+        // 0.2.x 起 defineTool 的契约里 output 是**必填**（旧版同样读 options.output.render）：
+        // 漏传会在定义期直接 TypeError，且错误被最后一个 spec 覆盖 → 4 个工具全部注册失败。
+        // 本插件的 execute 统一返回 JSON 文本，所以 schema 用 string、render 原样透出。
+        output: {
+          schema: { type: 'string' },
+          render: (_args, value) => [{ type: 'text', text: String(value) }],
+        },
         execute: async (args) => {
           try {
             return JSON.stringify({ ok: true, data: await spec.run(svc, args && typeof args === 'object' ? args : {}) })
