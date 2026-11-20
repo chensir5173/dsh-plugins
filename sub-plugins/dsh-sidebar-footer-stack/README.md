@@ -51,8 +51,8 @@ div.hHd-Xa_footArea            flex-direction: column
 [class*="_footArea"] > [class*="_footerActions"]:not(:has(> * + *)):not(:has(> * > * + *)){flex-direction:row !important;align-items:center !important;justify-content:flex-start !important;gap:0 !important;width:100% !important}
 [class*="_footArea"] > [class*="_footerActions"]:not(:has(> * + *)):not(:has(> * > * + *)) > *{display:block !important;flex:0 1 auto !important;width:auto !important;min-width:0 !important;max-width:none !important}
 [class*="_footArea"] > [class*="_footerActions"]:not(:has(> * + *)):not(:has(> * > * + *)) > * > *{width:auto !important;max-width:none !important}
-[class*="_collapsed"] [class*="_footArea"] > [class*="_footerActions"]{flex-direction:row !important;align-items:center !important;justify-content:center !important;gap:0 !important;width:auto !important}
-[class*="_collapsed"] [class*="_footArea"] > [class*="_footerActions"] > *{display:flex !important;flex-direction:row !important;align-items:center !important;justify-content:center !important;gap:0 !important;flex:0 1 auto !important;width:auto !important;min-width:0 !important;max-width:none !important}
+[class*="_collapsed"] [class*="_footArea"] > [class*="_footerActions"]{flex-direction:column !important;align-items:center !important;justify-content:center !important;gap:0 !important;width:auto !important}
+[class*="_collapsed"] [class*="_footArea"] > [class*="_footerActions"] > *{display:flex !important;flex-direction:column !important;align-items:center !important;justify-content:center !important;gap:4px !important;flex:0 0 auto !important;width:auto !important;min-width:0 !important;max-width:none !important}
 [class*="_collapsed"] [class*="_footArea"] > [class*="_footerActions"] > * > *{width:auto !important;max-width:none !important}
 ```
 
@@ -71,7 +71,7 @@ div.hHd-Xa_footArea            flex-direction: column
 ### 三条护栏
 
 1. **只有一个条目时保持横向**：判据是双条件 `:not(:has(> * + *)):not(:has(> * > * + *))` —— 「直接子元素 ≤ 1」**并且**「没有任何直接子元素内部存在兄弟对」。只看前一半会把「1 个 wrapper 里装着 N 个条目」误判成单条（v0.1.0 的事故）。不支持的浏览器只会丢掉这几条补救规则、仍然竖排，功能不受损。
-2. **收起态（rail）逐像素还原**：核心收起时把 `footerActions` 改成 `width:auto; justify-content:center`。这里用祖先类 `[class*="_collapsed"]` 显式还原成居中横排，三条规则特异性 (0,3,0) 高于上面所有 (0,2,0) 规则，且排在文件最后，双保险。
+2. **收起态（rail）也竖排**：窄轨只有 56px，两个条目横排实测总宽 64px（36 + 28），第二个图标会被裁掉一半（v0.2.0 照抄核心横排时就是这个症状）。这里用祖先类 `[class*="_collapsed"]` 把槽位与包装层都改成**居中列**，宽度回退成 `auto`（沿用 `width:100%` 会把窄轨撑开），三条规则特异性 (0,3,0) 高于上面所有 (0,2,0) 规则，且排在文件最后，双保险。
 3. **顺序即优先级**：column 规则在前、row 回退在后、collapsed 在最后；同一特异性下后者胜，所以顺序是功能的一部分，改顺序会复活 bug。
 
 > 为什么不用 `container-type` + `@container (min-width:…)`（v0.1.0 的做法）：容器查询会给 footArea 加上 `contain: layout`（页面多出的副作用），而且一旦没有元素匹配 `container-type`，整块 @container 规则就全部失效、连诊断都看不出来。收起态只靠一个稳定后缀的祖先类就能判断，没有必要引入容器查询。
@@ -90,7 +90,7 @@ div.hHd-Xa_footArea            flex-direction: column
 | 键 | 默认 | 范围 | 含义 |
 | --- | --- | --- | --- |
 | `enabled` | `true` | 布尔 | `false` 时不注册监听、不注入任何 CSS（回到核心横排） |
-| `gap` | `4` | 0–24 px | 条目之间的垂直间距（槽位层与包装层同时生效） |
+| `gap` | `4` | 0–24 px | 条目之间的垂直间距（展开态与收起态都生效） |
 | `stackSingle` | `false` | 布尔 | `true` 时连「只有一个条目」也竖排（即关掉护栏 1） |
 
 非法值会被夹到范围内；字符串数字（`"8"`）会被 `Number()` 转换；非对象配置整体回落默认。v0.1.0 的 `minWidth` 已删除 —— 那个键现在会被**忽略**（不再影响任何输出）。
@@ -100,8 +100,9 @@ div.hHd-Xa_footArea            flex-direction: column
 1. 在**本地插件管理器**里打开 `dsh-sidebar-footer-stack`（不要单独 `dsh plugin add` 装子插件）。
 2. 让样式生效：
    - Web（`dsh web`）：**首次启用后必须重启一次 `dsh web`** —— profile 的 `cordis.patch.yml` 只在 boot 时读取，运行中的进程不会加载新 entry（所有本地插件同理）。重启之后再改 `gap` / `stackSingle`，只需**刷新页面**（index 注入每次请求重新收集）。
+   - **改插件源码（不只是 config）同样要重启**：宿主半的 CSS 在 `apply()` 时构建并挂在 `webserver/index-inject` 的监听器上，运行中的进程已经持有旧字符串 —— 只把文件同步过去再刷新页面**不会**换掉折叠态规则（v0.2.1 实测：同步 + 刷新后，收起轨里仍是旧的横排 64px）。
    - 桌面版（DSH Desktop）：**必须重启 DSH Desktop** —— 桌面 host 只在 app ready 时收集一次注入，改 config 也要重启。
-3. 侧边栏左下角应变成：远程桥占一行、用量卡片占一行（完整形态）。
+3. 侧边栏左下角应变成：远程桥占一行、用量卡片占一行（完整形态）；收起侧边栏后两个图标**上下排列**，不再横向溢出窄轨。
 
 ## 诊断
 
@@ -125,7 +126,8 @@ window.__dshSidebarFooterStack.report()
 ```
 
 - `installed:false` → 样式没进页面（启用后还没重启 `dsh web` / 页面未刷新 / 桌面未重启 / 插件未启用）。
-- `hasFooterActions:false` → 找不到槽位容器（侧边栏收起，或上游把类名改成了非 `_footerActions` 后缀）。
+- `hasFootArea:false` → 找不到 footer 区域（上游把类名改成了非 `_footArea` 后缀；或当前 UI 是 Windows 标题栏模式，收起侧边栏时核心会整块隐藏 footArea）。
+- `hasFooterActions:false` → footArea 在，但里面没有槽位容器（上游把类名改成了非 `_footerActions` 后缀，或侧边栏正处于收起动画中）。
 - `flexDirection !== "column"` → 竖排规则没命中；若 `single:true` 是设计内的横向回退，否则多半是上游 DOM 结构变了。
 - `itemsOf()` 也暴露在句柄上，可直接看它认出了几个条目。
 

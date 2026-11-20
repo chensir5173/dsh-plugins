@@ -2,7 +2,7 @@
 
 把 DSH 侧边栏左下角（`sidebar.footer.action` 槽位，`kind: "list"`）里注册的多个插件条目，从**核心默认的横向并排**改成**竖向逐行堆叠**，且不依赖任何皮肤。
 
-做法：宿主半监听核心 web 服务的 `webserver/index-inject` 事件，往页面 `<head>` 注入一条样式 —— 让 `.…_footerActions` 竖排、**让它的包装层也竖排**、让每个条目占满整宽；并用「双 `:not(:has())`」在真的只有一个条目时回退横向、用 `[class*="_collapsed"]` 祖先类在收起轨里逐像素还原核心布局。
+做法：宿主半监听核心 web 服务的 `webserver/index-inject` 事件，往页面 `<head>` 注入一条样式 —— 让 `.…_footerActions` 竖排、**让它的包装层也竖排**、让每个条目占满整宽；并用「双 `:not(:has())`」在真的只有一个条目时回退横向、用 `[class*="_collapsed"]` 祖先类让收起轨里也保持居中竖排。
 
 **不改核心、不改皮肤、不接管插件自身样式**：核心 `@deepseek-ai/dsh-client-ui-sidebar` 的 `.…_footerActions{display:flex}` 没有 `flex-direction`，默认 `row` 才是横排的根因；皮肤只改 `--dsw-alias-*` 颜色变量，与本问题无关。
 
@@ -14,7 +14,7 @@
 | --- | --- |
 | 展开侧边栏 + 两个及以上 footer 条目 | 每个条目独占一行、撑满侧边栏宽度（264px）；标签不再被截断成 `Re...`；第二个条目的左边缘不再越过侧边栏右边界（v0.1.0 曾溢出到 x272） |
 | 展开侧边栏 + 只有一个 footer 条目 | 保持核心横向布局（双 `:not(:has())` 护栏），不做无意义的竖排 |
-| 收起侧边栏（rail） | `[class*="_collapsed"]` 三条规则（特异性 (0,3,0)，排在最后）把 `footerActions` 还原成 `width:auto` 居中横排 → 逐像素等于核心原样 |
+| 收起侧边栏（rail） | `[class*="_collapsed"]` 三条规则（特异性 (0,3,0)，排在最后）把槽位与包装层改成**居中列**、宽度 `auto`：56px 窄轨里两个图标上下排列，不再横向溢出（核心原样是横排，实测 35px 轨道内总宽 64px，第二个图标被裁掉一半） |
 | `stackSingle: true` | 连单条目也竖排（显式关掉护栏 1） |
 | `enabled: false` | 宿主半不注册监听、不注入任何样式，footer 回到核心横排 |
 | 用量卡片（`@kenz1117/dsh-ui-usage-billing`） | 竖排后宽度从 199px 变成 264px，**离开**它自己的 `@container (width<=210px)` 降级区间，恢复玻璃底 + 边框 + 仪表 + spark 柱 |
@@ -28,7 +28,7 @@
 
 ## 设计约束与取舍
 
-- **必须穿透包装层**：`kind:"list"` 的槽位只渲染一个 wrapper，插件条目在 wrapper 内部。判据（单条回退）与样式（竖排）都必须穿透到条目层，否则会同时出现「竖排失效」和「第二个条目溢出侧边栏」——v0.1.0 的真实事故，已在 `test/host.test.mjs` 里用 REGRESSION A / B 两条断言钉住。
+- **必须穿透包装层**：`kind:"list"` 的槽位只渲染一个 wrapper，插件条目在 wrapper 内部。判据（单条回退）与样式（竖排）都必须穿透到条目层，否则会同时出现「竖排失效」和「第二个条目溢出侧边栏」——v0.1.0 的真实事故，已在 `test/host.test.mjs` 里用 REGRESSION A / B 两条断言钉住；收起态竖排另由 REGRESSION C 钉住（三条 `_collapsed` 规则不得出现 `flex-direction:row`）。
 - **用后缀匹配而不是 hash 类名**：核心类名是 CSS module 生成的 `hHd-Xa_footerActions`，hash 前缀随 DSH 版本变、DOM 上也没有 `data-*` 锚点，所以选择器写成 `[class*="_footArea"]` / `[class*="_footerActions"]`，只依赖稳定的模块名后缀。
 - **不用容器查询**（v0.1.0 曾用 `container-type:inline-size` + `@container (min-width:120px)`）：容器查询会给 footArea 引入 `contain: layout` 的副作用；一旦没有元素匹配容器，整块 @container 规则失效且诊断上看不出原因。收起态改用稳定后缀的祖先类 `[class*="_collapsed"]` 判断，并靠特异性 + 文件末尾顺序双保险。
 - **不碰插件自己的样式**：只做 `flex-direction` / `width` 级别的容器规则；用量卡片内部的 `@container` 规则由它自己响应宽度变化，插件不替它决定形态。
@@ -75,8 +75,9 @@ await import('file:///…/test/__run_host.test.mjs.' + Date.now() + '.mjs')
 - [x] 1.14 `[A]` **条目计数穿透包装层**：`footerActions > wrapper > 3 entries` 报 `count:3`（wrapper 不算作 1 条）；`wrapper` 里只有 1 条时报 `count:1 / single:true` —— `test/bundle.test.mjs`
 - [x] 1.15 `[A]` 单条目 → `single:true`、`ok:true`、不告警；注入但两条目仍 `row` → `ok:false` 且 note 含条目数与宽度；无 footArea → `hasFooterActions:false` —— `test/bundle.test.mjs`
 - [x] 1.16 `[A]` 健壮性：无 `getComputedStyle` 时降级为 `flexDirection:null`；抛错的 DOM 访问器不抛；`footerActions` 无子元素不抛；连 `document` 都不存在时仍能注册并给出 `ok:false` —— `test/bundle.test.mjs`
+- [x] 1.17 `[A]` **REGRESSION C**：收起态三条规则必须竖排 —— 三条 `[class*="_collapsed"]` 规则**均不含** `flex-direction:row`；槽位层 `column + align-items:center + justify-content:center + width:auto`；包装层 `column + align-items:center` 且带配置的 `gap`；条目层 `width:auto` —— `test/host.test.mjs`
 
-当前结果：**host 26/26 通过，bundle 14/14 通过**。
+当前结果：**host 27/27 通过，bundle 14/14 通过**。
 
 ### 2. 真机（需要真实 DSH Web / 桌面 + 浏览器）
 
@@ -85,7 +86,7 @@ await import('file:///…/test/__run_host.test.mjs.' + Date.now() + '.mjs')
 - [ ] 2.3 `[B]` 视觉：远程桥（Remote）与用量卡片各占一行；Remote 标签完整（不再显示 `Re...`）
 - [ ] 2.4 `[B]` 视觉：用量卡片宽度约 264px，恢复玻璃底 + 边框 + 仪表 + spark 柱（不再是无边框的 `@container (width<=210px)` 降级形态）
 - [ ] 2.5 `[B]` 浮层：点开用量卡片，浮层左缘与侧边栏左缘对齐（`left ≈ triggerWrap.left ≈ 8`），不被裁到侧边栏外
-- [ ] 2.6 `[B]` 收起侧边栏：footer 回到核心的居中横向布局，`snapshot().hasFootArea` 仍为 true、`stacked:false`
+- [ ] 2.6 `[B]` 收起侧边栏：footer 两个图标**上下排列**、水平居中；`snapshot().hasFootArea` 仍为 true、`stacked:true`，`footerActions` 不再横向溢出窄轨（v0.2.0 实测 35px 轨道里横排总宽 64px，第二个图标被裁掉一半）
 - [ ] 2.7 `[B]` 只启用一个 footer 插件：footer 保持横向，`report()` 显示 `single:true` 且 `ok:true`
 - [ ] 2.8 `[B]` `sidebar.settings` 条目（`@linxin666/dsh-usage` 若启用）位置与外观不变
 - [ ] 2.9 `[B]` 切换皮肤（如 furina ↔ 其它）后仍是竖排 —— 证明与皮肤无关

@@ -14,6 +14,13 @@
 //   3. WARN when the stylesheet never reached <head> (stale page — web collects
 //      injections per request, desktop only at app-ready).
 //
+// COLLAPSED RAIL
+// The rail is 56px wide; the core gives footerActions `width:auto` there. The
+// host half therefore stacks the rail too (centred column, width:auto), so
+// `flexDirection === "column"` and `stacked:true` are the expected readings in
+// BOTH the expanded and the collapsed sidebar. A row here means the CSS did not
+// load or an upstream rule won.
+//
 // COUNTING ENTRIES IS NON-TRIVIAL
 // The list slot renders ONE wrapper child under footerActions and puts the
 // plugin entries inside it (footerActions > wrapper > entry, entry, ...). A
@@ -138,11 +145,14 @@ window.__ModuleLoader__.load({
       if (!state.installed) {
         return { ...state, ok: false, note: '页面里没有本插件的 <style>：Web 端刷新页面，桌面端重启 DSH Desktop。' }
       }
+      if (!state.hasFootArea) {
+        return { ...state, ok: false, note: '没找到侧边栏 footer 容器：核心类名后缀变了，或当前 UI 不渲染 footer（Windows 标题栏模式下收起侧边栏会隐藏 footArea）。' }
+      }
       if (!state.hasFooterActions) {
-        return { ...state, ok: false, note: '没找到侧边栏 footer 容器：侧边栏可能被收起，或核心类名后缀变了。' }
+        return { ...state, ok: false, note: 'footArea 在，但里面没有 footerActions：核心结构变了，或侧边栏正处于收起动画中。' }
       }
       if (state.single) {
-        return { ...state, ok: true, note: 'footer 只有 ' + state.count + ' 个条目，按设计保持核心横向布局。' }
+        return { ...state, ok: true, note: 'footer 只有 ' + state.count + ' 个条目，按设计保持核心居中布局。' }
       }
       if (state.stacked) {
         return { ...state, ok: true, note: '已竖排：' + state.count + ' 个条目各占一行，容器宽 ' + state.width + '。' }

@@ -44,12 +44,16 @@
 // profile-level plugin context receives it and no service has to be injected.
 //
 // TWO GUARDS, both load-bearing:
-//   1. COLLAPSED RAIL. In the collapsed sidebar the core already forces
-//      `.collapsed .footerActions{width:auto;justify-content:center}` and there
-//      is no room for a full-width stack. The collapsed state is expressed as an
-//      ancestor class (hHd-Xa_collapsed), so the guard is a plain descendant rule
+//   1. COLLAPSED RAIL. The collapsed rail is 56px wide and the core forces
+//      `.collapsed .footerActions{width:auto;justify-content:center}` there, so
+//      a row of entries cannot fit: measured in DSH 0.3.x, the two rail entries
+//      are 36px + 28px wide inside a 35px rail, which clips the second icon in
+//      half. v0.2.0 "restored" that core row verbatim and inherited the
+//      clipping. The rail now stacks too: the same descendant rule
 //      `[class*="_collapsed"] [class*="_footArea"] > [class*="_footerActions"]`
-//      written LAST: same-or-higher specificity, later in the sheet, wins.
+//      becomes a CENTRED COLUMN with `width:auto` (a percentage width would
+//      stretch the rail instead of shrinking to the icons). Written LAST with
+//      specificity (0,3,0), so it beats every (0,2,0) rule above.
 //      (v0.1.0 used a @container (min-width:120px) query instead, which required
 //      `container-type:inline-size` on footArea — an extra contain:layout in the
 //      page for no benefit. Dropped: no containment side effects now.)
@@ -130,8 +134,8 @@ function normalizeEntryConfig(input) {
 }
 
 /**
- * 生成注入用的整段 CSS：marker + 两条竖排规则（槽位层、包装层、条目层）
- * + 可选单条回退 + 折叠态回退（永远最后）。
+ * 生成注入用的整段 CSS：marker + 三条竖排规则（槽位层、包装层、条目层）
+ * + 可选单条回退 + 折叠态竖排（永远最后）。
  * @param {unknown} input 原始配置
  * @returns {string} 空串表示禁用（调用方不注册监听器）
  */
@@ -168,11 +172,13 @@ function buildCss(input) {
     rules.push(single + ' > * > *{width:auto !important;max-width:none !important}')
   }
 
-  // 折叠轨：核心自己的布局是居中横排，这里显式还原。特异性 (0,3,0) 高于上面
-  // 所有 (0,2,0) 规则，且排在最后，双保险。
+  // 折叠轨（rail）同样竖排，但宽度必须回退成 auto：窄轨只有 56px，条目横排时
+  // 实测总宽 64px（36 + 28），第二个图标被裁掉一半。这里把槽位与包装层都改成
+  // 「居中列」，条目宽度 auto（不能沿用上面的 width:100%，否则会把窄轨撑开）。
+  // 特异性 (0,3,0) 高于上面所有 (0,2,0) 规则，且排在最后，双保险。
   const collapsed = '[class*="_collapsed"] ' + actions
-  rules.push(collapsed + '{flex-direction:row !important;align-items:center !important;justify-content:center !important;gap:0 !important;width:auto !important}')
-  rules.push(collapsed + ' > *{display:flex !important;flex-direction:row !important;align-items:center !important;justify-content:center !important;gap:0 !important;flex:0 1 auto !important;width:auto !important;min-width:0 !important;max-width:none !important}')
+  rules.push(collapsed + '{flex-direction:column !important;align-items:center !important;justify-content:center !important;gap:0 !important;width:auto !important}')
+  rules.push(collapsed + ' > *{display:flex !important;flex-direction:column !important;align-items:center !important;justify-content:center !important;gap:' + gap + 'px !important;flex:0 0 auto !important;width:auto !important;min-width:0 !important;max-width:none !important}')
   rules.push(collapsed + ' > * > *{width:auto !important;max-width:none !important}')
 
   return STYLE_MARKER + '\n' + rules.join('\n') + '\n'

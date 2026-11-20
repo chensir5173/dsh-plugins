@@ -223,7 +223,7 @@ test('the stylesheet is also found by marker when the id is missing', () => {
   assert.equal(state.ok, true)
 })
 
-test('a single footer entry keeps the core row layout and is not treated as a failure', () => {
+test('a single footer entry keeps the core layout and is not treated as a failure', () => {
   const { win, warnings } = load({
     styles: [styleNode('dsh-sidebar-footer-stack', MARKER)],
     footArea: footArea(1),
@@ -233,7 +233,7 @@ test('a single footer entry keeps the core row layout and is not treated as a fa
   assert.equal(state.single, true)
   assert.equal(state.ok, true)
   assert.match(state.note, /1 个条目/)
-  assert.match(state.note, /横向/)
+  assert.match(state.note, /居中/)
   assert.equal(warnings.length, 0, 'single entry is the documented behaviour, no warning')
 })
 
@@ -253,7 +253,7 @@ test('injected but still horizontal with two entries is reported as a failure wi
   assert.match(warnings[0], /report\(\)/)
 })
 
-test('a missing footArea (collapsed sidebar or renamed classes) reports hasFooterActions:false', () => {
+test('a missing footArea (renamed classes or the Windows titlebar mode) reports hasFootArea:false', () => {
   const { win } = load({
     styles: [styleNode('dsh-sidebar-footer-stack', MARKER)],
     footArea: null,
@@ -277,6 +277,7 @@ test('a hidden sidebar element without a footerActions child is handled without 
   assert.equal(state.hasFootArea, true)
   assert.equal(state.hasFooterActions, false)
   assert.equal(state.ok, false)
+  assert.match(state.note, /没有 footerActions/)
 })
 
 test('no getComputedStyle (unusual host) degrades to flexDirection:null instead of throwing', () => {

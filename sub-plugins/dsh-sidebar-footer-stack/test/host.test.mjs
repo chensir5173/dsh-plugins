@@ -96,6 +96,22 @@ test('the collapsed rail guard is the very last rule', () => {
   assert.match(tail, /width:auto !important/)
 })
 
+test('REGRESSION C: the collapsed rail stacks entries instead of clipping a row', () => {
+  const css = host.buildCss(host.DEFAULTS)
+  const rules = css.split('\n').filter((line) => line.startsWith('[class*="_collapsed"]'))
+  assert.equal(rules.length, 3, 'slot + wrapper + entry rules')
+  for (const rule of rules) {
+    assert.ok(rule.indexOf('flex-direction:row') < 0, 'the rail must not fall back to a row: ' + rule)
+  }
+  // 56px rail: the same width:100% that expands the stack would stretch the rail,
+  // so every rail layer keeps width:auto and centres the icons.
+  assert.match(rules[0], /\{flex-direction:column !important;align-items:center !important;justify-content:center !important/)
+  assert.match(rules[0], /width:auto !important\}/)
+  assert.match(rules[1], /flex-direction:column !important;align-items:center !important/)
+  assert.match(rules[1], /gap:4px !important/)
+  assert.match(rules[2], /width:auto !important/)
+})
+
 test('stackSingle:true drops the single-entry guard but keeps the collapsed guard', () => {
   const css = host.buildCss({ stackSingle: true })
   assert.ok(css.indexOf(':has(') < 0, 'no :has() rule when every entry stacks')
@@ -109,7 +125,7 @@ test('enabled:false ships no CSS at all', () => {
 
 test('the configured gap reaches every stacked layer', () => {
   const css = host.buildCss({ gap: 10 })
-  assert.equal(css.split('gap:10px !important').length - 1, 2, 'slot + wrapper both use the gap')
+  assert.equal(css.split('gap:10px !important').length - 1, 3, 'slot + wrapper + collapsed wrapper')
   assert.ok(css.indexOf('gap:4px') < 0)
 })
 
